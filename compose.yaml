@@ -1,0 +1,39 @@
+services:
+  trading-dashboard:
+    build: .
+    container_name: trading-dashboard
+    restart: unless-stopped
+    environment:
+      TZ: Asia/Seoul
+      TRADING_DASHBOARD_DB_PATH: /data/trading_dashboard.db
+      UPBIT_ACCESS_KEY: ${UPBIT_ACCESS_KEY:-}
+      UPBIT_SECRET_KEY: ${UPBIT_SECRET_KEY:-}
+      KIS_IS_PAPER: ${KIS_IS_PAPER:-false}
+      KIS_PENSION_APP_KEY: ${KIS_PENSION_APP_KEY:-}
+      KIS_PENSION_APP_SECRET: ${KIS_PENSION_APP_SECRET:-}
+      KIS_PENSION_ACCOUNT_NO: ${KIS_PENSION_ACCOUNT_NO:-}
+      KIS_PENSION_ACCOUNT_PRODUCT_CODE: ${KIS_PENSION_ACCOUNT_PRODUCT_CODE:-}
+      KIS_PENSION_LABEL: ${KIS_PENSION_LABEL:-연금저축}
+      KIS_PENSION_CATEGORY: ${KIS_PENSION_CATEGORY:-연금}
+      KIS_ISA_APP_KEY: ${KIS_ISA_APP_KEY:-}
+      KIS_ISA_APP_SECRET: ${KIS_ISA_APP_SECRET:-}
+      KIS_ISA_ACCOUNT_NO: ${KIS_ISA_ACCOUNT_NO:-}
+      KIS_ISA_ACCOUNT_PRODUCT_CODE: ${KIS_ISA_ACCOUNT_PRODUCT_CODE:-}
+      KIS_ISA_LABEL: ${KIS_ISA_LABEL:-ISA중개형}
+      KIS_ISA_CATEGORY: ${KIS_ISA_CATEGORY:-주식(국내)}
+      TOSSINVEST_CLIENT_ID: ${TOSSINVEST_CLIENT_ID:-}
+      TOSSINVEST_CLIENT_SECRET: ${TOSSINVEST_CLIENT_SECRET:-}
+      TOSSINVEST_BASE_URL: ${TOSSINVEST_BASE_URL:-https://openapi.tossinvest.com}
+      TOSSINVEST_ACCOUNT_SEQ: ${TOSSINVEST_ACCOUNT_SEQ:-}
+      TOSSINVEST_ACCOUNT_LABEL: ${TOSSINVEST_ACCOUNT_LABEL:-토스증권}
+      TOSSINVEST_ACCOUNT_CATEGORY: ${TOSSINVEST_ACCOUNT_CATEGORY:-주식(해외)}
+    ports:
+      - "8765:8765"
+    volumes:
+      - ./data:/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "from urllib.request import urlopen; urlopen('http://127.0.0.1:8765/api/health', timeout=3).read()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s

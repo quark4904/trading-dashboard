@@ -1,0 +1,1 @@
+"""Trading dashboard MVP backend."""
