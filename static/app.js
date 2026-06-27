@@ -4,6 +4,8 @@ const number = new Intl.NumberFormat("ko-KR", { maximumFractionDigits: 6 });
 const state = {
   platforms: [],
   summary: null,
+  syncStatus: { latest: [], history: [], api_keys: [] },
+  aliasTarget: null,
   assetFilters: {
     platform: "all",
     query: "",
@@ -16,8 +18,13 @@ async function api(path, options = {}) {
     headers: { "Content-Type": "application/json" },
     ...options,
   });
-  if (!response.ok) throw new Error(`API ${response.status}`);
-  return response.json();
+  const data = await response.json();
+  if (!response.ok) {
+    const error = new Error(data.error || `API ${response.status}`);
+    error.data = data;
+    throw error;
+  }
+  return data;
 }
 
 function pnlClass(value) {
@@ -31,6 +38,15 @@ function platformLabel(platform) {
     kis_isa: "한투(ISA)",
     toss: "토스",
   }[platform] ?? platform;
+}
+
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
 }
 
 function renderMetrics(total) {
@@ -47,7 +63,7 @@ function renderMetrics(total) {
 function table(headers, rows) {
   return `
     <table>
-      <thead><tr>${headers.map((header) => `<th>${header}</th>`).join("")}</tr></thead>
+      <thead><tr>${headers.map((header) => `<th>${escapeHtml(header)}</th>`).join("")}</tr></thead>
       <tbody>${rows.join("")}</tbody>
     </table>
   `;
@@ -59,8 +75,8 @@ function renderPlatforms() {
       (item) => `
         <div class="status-item">
           <div>
-            <strong>${item.name}</strong>
-            <div>${item.category} · 실거래 ${item.live_trading ? "허용" : "차단"}</div>
+            <strong>${escapeHtml(item.name)}</strong>
+            <div>${escapeHtml(item.category)} · 실거래 ${item.live_trading ? "허용" : "차단"}</div>
           </div>
           <span class="dot ${item.configured ? "ok" : ""}" title="${item.configured ? "키 설정됨" : "키 누락"}"></span>
         </div>
@@ -68,7 +84,9 @@ function renderPlatforms() {
     )
     .join("");
 
-  const options = state.platforms.map((p) => `<option value="${p.code}">${p.name}</option>`).join("");
+  const options = state.platforms
+    .map((p) => `<option value="${escapeHtml(p.code)}">${escapeHtml(p.name)}</option>`)
+    .join("");
   document.querySelector('#strategyForm select[name="platform"]').innerHTML = `<option value="">전체</option>${options}`;
   const assetFilter = document.querySelector("#assetPlatformFilter");
   const currentValue = assetFilter.value || "all";
@@ -79,12 +97,13 @@ function renderPlatforms() {
 function renderPortfolio(summary) {
   renderMetrics(summary.total);
   renderCash(summary.cash);
+  renderFxStatus(summary.exchange_rate);
   document.querySelector("#platformTable").innerHTML = table(
     ["플랫폼", "평가금액", "손익", "수익률"],
     summary.by_platform.map(
       (item) => `
         <tr>
-          <td>${item.name}</td>
+          <td>${escapeHtml(item.name)}</td>
           <td>${won.format(item.value)}</td>
           <td class="${pnlClass(item.pnl)}">${won.format(item.pnl)}</td>
           <td class="${pnlClass(item.pnl)}">${item.pnl_pct.toFixed(2)}%</td>
@@ -97,22 +116,45 @@ function renderPortfolio(summary) {
   document.querySelector("#smallAssetsToggle").textContent = `펼치기 (${summary.small_symbols.length}개)`;
 
   document.querySelector("#smallSymbolTable").innerHTML = table(
-    ["플랫폼", "종목", "상태", "수량", "현재가", "평가금액"],
+    ["플랫폼", "종목", "상태", "수량", "현재가", "평가금액", "관리"],
     summary.small_symbols.length
       ? summary.small_symbols.map(
           (item) => `
         <tr>
-          <td>${platformLabel(item.platform)}</td>
-          <td><strong>${item.name}</strong><br />${item.symbol}</td>
+          <td>${escapeHtml(platformLabel(item.platform))}</td>
+          <td><strong>${escapeHtml(assetName(item))}</strong><br />${escapeHtml(item.symbol)}</td>
           <td>${valuationLabel(item.valuation_status)}</td>
           <td>${number.format(item.quantity)}</td>
           <td>${won.format(item.current_price)}</td>
           <td>${won.format(item.value)}</td>
+          <td>${aliasButton(item)}</td>
         </tr>
       `,
         )
-      : [`<tr><td colspan="6">평가금액 ${won.format(summary.dust_value_threshold)} 미만 자산이 없습니다.</td></tr>`],
+      : [`<tr><td colspan="7">평가금액 ${won.format(summary.dust_value_threshold)} 미만 자산이 없습니다.</td></tr>`],
   );
+}
+
+function renderFxStatus(exchangeRate) {
+  const element = document.querySelector("#fxMessage");
+  element.className = `fx-message ${exchangeRate?.status || ""}`;
+  if (!exchangeRate) {
+    element.textContent = "USD/KRW 환율 정보 없음";
+    return;
+  }
+  if (exchangeRate.status === "failed" || exchangeRate.rate == null) {
+    element.textContent = `USD/KRW 환율 조회 실패${exchangeRate.error ? ` · ${exchangeRate.error}` : ""}`;
+    return;
+  }
+
+  const source = {
+    configured: "설정값",
+    "open.er-api.com": "실시간 조회",
+    cached: "마지막 정상값",
+  }[exchangeRate.source] || exchangeRate.source;
+  const stale = exchangeRate.status === "stale" ? " · 조회 실패로 이전 값 사용 중" : "";
+  element.textContent =
+    `USD/KRW ${number.format(exchangeRate.rate)} · ${source} · ${formatSyncTime(new Date(exchangeRate.fetched_at))}${stale}`;
 }
 
 function renderCash(cash) {
@@ -125,7 +167,7 @@ function renderCash(cash) {
     .map(
       (item) => `
         <div class="cash-card">
-          <span>${item.name || platformLabel(item.platform)}</span>
+          <span>${escapeHtml(item.name || platformLabel(item.platform))}</span>
           <strong>${won.format(item.amount)}</strong>
         </div>
       `,
@@ -137,7 +179,7 @@ function renderAssetTable() {
   const items = filteredAssets();
   document.querySelector("#assetCount").textContent = `${items.length}개`;
   document.querySelector("#symbolTable").innerHTML = table(
-    ["플랫폼", "종목", "수량", "평균가", "현재가", "평가금액", "손익", "수익률"],
+    ["플랫폼", "종목", "수량", "평균가", "현재가", "평가금액", "손익", "수익률", "관리"],
     symbolRows(items),
   );
 }
@@ -151,7 +193,7 @@ function filteredAssets() {
     .filter((item) => state.assetFilters.platform === "all" || item.platform === state.assetFilters.platform)
     .filter((item) => {
       if (!query) return true;
-      return `${item.name} ${item.symbol}`.toLowerCase().includes(query);
+      return `${assetName(item)} ${item.name} ${item.symbol}`.toLowerCase().includes(query);
     })
     .sort((a, b) => {
       switch (state.assetFilters.sort) {
@@ -164,7 +206,7 @@ function filteredAssets() {
         case "pnl_pct_desc":
           return b.pnl_pct - a.pnl_pct;
         case "name_asc":
-          return collator.compare(a.name, b.name);
+          return collator.compare(assetName(a), assetName(b));
         case "value_desc":
         default:
           return b.value - a.value;
@@ -177,18 +219,36 @@ function symbolRows(items) {
     ? items.map(
         (item) => `
         <tr>
-          <td>${platformLabel(item.platform)}</td>
-          <td><strong>${item.name}</strong><br />${item.symbol}</td>
+          <td>${escapeHtml(platformLabel(item.platform))}</td>
+          <td><strong>${escapeHtml(assetName(item))}</strong><br />${escapeHtml(item.symbol)}</td>
           <td>${number.format(item.quantity)}</td>
           <td>${won.format(item.avg_price)}</td>
           <td>${won.format(item.current_price)}</td>
           <td>${won.format(item.value)}</td>
           <td class="${pnlClass(item.pnl)}">${won.format(item.pnl)}</td>
           <td class="${pnlClass(item.pnl)}">${item.pnl_pct.toFixed(2)}%</td>
+          <td>${aliasButton(item)}</td>
         </tr>
       `,
       )
-    : [`<tr><td colspan="8">표시할 일반 자산이 없습니다.</td></tr>`];
+    : [`<tr><td colspan="9">표시할 일반 자산이 없습니다.</td></tr>`];
+}
+
+function assetName(item) {
+  return item.display_name || item.alias || item.name || item.symbol;
+}
+
+function aliasButton(item) {
+  return `
+    <button
+      class="table-action"
+      type="button"
+      data-alias-platform="${escapeHtml(item.platform)}"
+      data-alias-symbol="${escapeHtml(item.symbol)}"
+      data-alias-name="${escapeHtml(item.name)}"
+      data-alias-value="${escapeHtml(item.alias || "")}"
+    >${item.alias ? "별칭 수정" : "별칭 등록"}</button>
+  `;
 }
 
 function valuationLabel(status) {
@@ -209,13 +269,13 @@ async function renderOrders() {
           (item) => `
         <tr>
           <td>${new Date(item.created_at).toLocaleString("ko-KR")}</td>
-          <td>${platformLabel(item.platform)}</td>
-          <td>${item.symbol}</td>
+          <td>${escapeHtml(platformLabel(item.platform))}</td>
+          <td>${escapeHtml(item.symbol)}</td>
           <td>${item.side === "buy" ? "매수" : "매도"}</td>
           <td>${item.quantity ?? "-"}</td>
           <td>${item.amount ? won.format(item.amount) : "-"}</td>
-          <td>${item.status}</td>
-          <td>${item.reason}</td>
+          <td>${escapeHtml(item.status)}</td>
+          <td>${escapeHtml(item.reason)}</td>
         </tr>
       `,
         )
@@ -231,13 +291,13 @@ async function renderStrategies() {
       (item) => `
         <tr>
           <td>${item.enabled ? "활성" : "중지"}</td>
-          <td>${item.name}</td>
-          <td>${item.strategy_type}</td>
-          <td>${item.platform ? platformLabel(item.platform) : "전체"} ${item.symbol || ""}</td>
+          <td>${escapeHtml(item.name)}</td>
+          <td>${escapeHtml(item.strategy_type)}</td>
+          <td>${escapeHtml(item.platform ? platformLabel(item.platform) : "전체")} ${escapeHtml(item.symbol || "")}</td>
           <td>${won.format(item.budget || 0)}</td>
           <td>${item.take_profit_pct ?? "-"}%</td>
           <td>${item.stop_loss_pct ?? "-"}%</td>
-          <td><button class="secondary" data-strategy="${item.id}" data-enabled="${!item.enabled}">${item.enabled ? "중지" : "활성"}</button></td>
+          <td><button class="secondary" data-strategy="${escapeHtml(item.id)}" data-enabled="${!item.enabled}">${item.enabled ? "중지" : "활성"}</button></td>
         </tr>
       `,
     ),
@@ -245,9 +305,15 @@ async function renderStrategies() {
 }
 
 async function refresh() {
-  const [platforms, summary] = await Promise.all([api("/api/platforms"), api("/api/portfolio/summary")]);
+  const [platforms, summary, syncStatus] = await Promise.all([
+    api("/api/platforms"),
+    api("/api/portfolio/summary"),
+    api("/api/sync/status"),
+  ]);
   state.platforms = platforms;
   state.summary = summary;
+  state.syncStatus = syncStatus;
+  renderSyncStatus(syncStatus);
   renderPlatforms();
   renderPortfolio(summary);
   await Promise.all([renderOrders(), renderStrategies()]);
@@ -291,22 +357,177 @@ document.querySelector("#smallAssetsToggle").addEventListener("click", () => {
 async function syncHoldings(path, label) {
   const message = document.querySelector("#syncMessage");
   message.textContent = `${label} 잔고를 동기화하는 중입니다.`;
+  document.querySelector("#syncDialogSummary").textContent = `${label} 잔고를 동기화하는 중입니다.`;
+  setSyncButtonsDisabled(true);
   try {
     const result = await api(path, { method: "POST" });
-    message.textContent = syncMessage(label, result);
+    renderSyncResult(result);
     await refresh();
   } catch (error) {
-    message.textContent = `${label} 동기화 실패: ${error.message}`;
+    const detail = error.data?.error || error.data?.results?.find((item) => item.error)?.error || error.message;
+    message.textContent = `${label} 동기화 실패: ${detail}`;
+    document.querySelector("#syncDialogSummary").textContent = `${label} 동기화 실패: ${detail}`;
+  } finally {
+    setSyncButtonsDisabled(false);
   }
 }
 
-function syncMessage(label, result) {
-  if (result.synced_count !== undefined) return `${label} ${result.synced_count}개 자산을 동기화했습니다.`;
-  if (Array.isArray(result.results)) {
-    const failed = result.results.filter((item) => item.ok === false).length;
-    return failed ? `${label} 완료: 성공 ${result.results.length - failed}개, 실패 ${failed}개` : `${label} 동기화 완료`;
+function setSyncButtonsDisabled(disabled) {
+  for (const id of ["syncAllButton", "syncUpbitButton", "syncKisButton", "syncTossButton"]) {
+    document.querySelector(`#${id}`).disabled = disabled;
   }
-  return `${label} 동기화 완료`;
+}
+
+function renderSyncResult(result) {
+  const message = document.querySelector("#syncMessage");
+  if (result.status === "partial") {
+    const failures = collectSyncResults(result).filter((item) => item.ok === false);
+    message.textContent = `일부 동기화 실패: ${failures.map((item) => platformLabel(item.platform)).join(", ")}`;
+    return;
+  }
+
+  const completed = collectSyncResults(result)
+    .map((item) => item.completed_at)
+    .filter(Boolean)
+    .sort()
+    .at(-1);
+  if (completed) message.textContent = `Last synced: ${formatSyncTime(new Date(completed))}`;
+}
+
+function collectSyncResults(result) {
+  if (!Array.isArray(result.results)) return [result];
+  return result.results.flatMap((item) => collectSyncResults(item));
+}
+
+function syncHealth(latest) {
+  if (!latest?.length) return { status: "unknown", label: "동기화 미확인" };
+
+  const expected = new Set(state.platforms.filter((item) => item.configured).map((item) => item.code));
+  const completedPlatforms = new Set(latest.map((item) => item.platform));
+  const hasMissing = [...expected].some((platform) => !completedPlatforms.has(platform));
+  const running = latest.filter((item) => item.status === "running").length;
+  const failed = latest.filter((item) => item.status === "failed").length;
+  const succeeded = latest.filter((item) => item.status === "success").length;
+
+  if (running) return { status: "partial", label: "동기화 중" };
+  if (failed && !succeeded) return { status: "failed", label: "동기화 실패" };
+  if (failed || hasMissing) return { status: "partial", label: "동기화 확인 필요" };
+  return { status: "success", label: "동기화 정상" };
+}
+
+function renderSyncStatus(syncStatus) {
+  const latest = syncStatus?.latest ?? [];
+  const health = syncHealth(latest);
+  const badge = document.querySelector("#syncStatusButton");
+  badge.className = `sync-status-badge ${health.status}`;
+  badge.querySelector("span:last-child").textContent = health.label;
+  renderSyncDialog(syncStatus);
+
+  if (!latest.length) return;
+  const message = document.querySelector("#syncMessage");
+  const failures = latest.filter((item) => item.status === "failed");
+  if (failures.length) {
+    message.textContent = `동기화 확인 필요: ${failures.map((item) => platformLabel(item.platform)).join(", ")}`;
+    return;
+  }
+
+  const completed = latest
+    .filter((item) => item.status === "success" && item.completed_at)
+    .map((item) => item.completed_at)
+    .sort()
+    .at(-1);
+  if (completed) message.textContent = `Last synced: ${formatSyncTime(new Date(completed))}`;
+}
+
+function renderSyncDialog(syncStatus) {
+  const latest = syncStatus?.latest ?? [];
+  const history = syncStatus?.history ?? [];
+  const apiKeys = syncStatus?.api_keys ?? [];
+  const health = syncHealth(latest);
+  const completed = latest
+    .map((item) => item.completed_at)
+    .filter(Boolean)
+    .sort()
+    .at(-1);
+  document.querySelector("#syncDialogSummary").textContent = completed
+    ? `${health.label} · Last synced: ${formatSyncTime(new Date(completed))}`
+    : health.label;
+
+  document.querySelector("#apiKeyCards").innerHTML = apiKeys.length
+    ? apiKeys
+        .map(
+          (item) => `
+            <article class="api-key-card">
+              <div class="api-key-card-header">
+                <strong>${escapeHtml(item.name)}</strong>
+                <span class="api-key-days ${escapeHtml(item.status)}">${escapeHtml(apiKeyStatusText(item))}</span>
+              </div>
+              <p>${item.expires_at ? escapeHtml(item.expires_at) : "만료일 미설정"}</p>
+            </article>
+          `,
+        )
+        .join("")
+    : `<div class="sync-empty">API 키 만료일 설정이 없습니다.</div>`;
+
+  document.querySelector("#syncPlatformCards").innerHTML = latest.length
+    ? latest
+        .map(
+          (item) => `
+            <article class="sync-platform-card">
+              <div class="sync-platform-card-header">
+                <strong>${escapeHtml(platformLabel(item.platform))}</strong>
+                <span class="sync-result ${escapeHtml(item.status)}">${escapeHtml(syncStatusLabel(item.status))}</span>
+              </div>
+              <p>${item.synced_count == null ? "동기화 수량 없음" : `${number.format(item.synced_count)}개 자산`}</p>
+              <p>${escapeHtml(syncRunTime(item))}</p>
+              ${item.error ? `<p>${escapeHtml(item.error)}</p>` : ""}
+            </article>
+          `,
+        )
+        .join("")
+    : `<div class="sync-empty">아직 동기화 기록이 없습니다.</div>`;
+
+  document.querySelector("#syncHistory").innerHTML = history.length
+    ? history
+        .map(
+          (item) => `
+            <article class="sync-history-item">
+              <div class="sync-history-item-header">
+                <strong>${escapeHtml(platformLabel(item.platform))}</strong>
+                <span class="sync-result ${escapeHtml(item.status)}">${escapeHtml(syncStatusLabel(item.status))}</span>
+              </div>
+              <p>${escapeHtml(syncRunTime(item))}${item.synced_count == null ? "" : ` · ${number.format(item.synced_count)}개 자산`}</p>
+              ${item.error ? `<p>${escapeHtml(item.error)}</p>` : ""}
+            </article>
+          `,
+        )
+        .join("")
+    : `<div class="sync-empty">최근 실행 이력이 없습니다.</div>`;
+}
+
+function apiKeyStatusText(item) {
+  if (item.status === "unknown") return "미설정";
+  if (item.status === "invalid") return "형식 오류";
+  if (item.status === "expired") return `${Math.abs(item.days_remaining)}일 경과`;
+  return `${item.days_remaining}일 남음`;
+}
+
+function syncStatusLabel(status) {
+  return {
+    success: "성공",
+    failed: "실패",
+    running: "진행 중",
+  }[status] ?? status;
+}
+
+function syncRunTime(item) {
+  const timestamp = item.completed_at || item.started_at;
+  return timestamp ? formatSyncTime(new Date(timestamp)) : "시간 정보 없음";
+}
+
+function formatSyncTime(date) {
+  const pad = (value) => String(value).padStart(2, "0");
+  return `${date.getFullYear()}. ${pad(date.getMonth() + 1)}. ${pad(date.getDate())}. ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
 }
 
 document.querySelector("#syncAllButton").addEventListener("click", () => {
@@ -325,6 +546,84 @@ document.querySelector("#syncTossButton").addEventListener("click", () => {
   syncHoldings("/api/sync/toss", "토스");
 });
 
+document.querySelector("#syncStatusButton").addEventListener("click", () => {
+  document.querySelector("#syncStatusDialog").showModal();
+});
+
+document.querySelector("#syncDialogClose").addEventListener("click", () => {
+  document.querySelector("#syncStatusDialog").close();
+});
+
+document.querySelector("#syncStatusDialog").addEventListener("click", (event) => {
+  if (event.target === event.currentTarget) event.currentTarget.close();
+});
+
+document.addEventListener("click", (event) => {
+  const button = event.target.closest("[data-alias-symbol]");
+  if (!button) return;
+
+  state.aliasTarget = {
+    platform: button.dataset.aliasPlatform,
+    symbol: button.dataset.aliasSymbol,
+    name: button.dataset.aliasName,
+    alias: button.dataset.aliasValue,
+  };
+  document.querySelector("#aliasAssetInfo").textContent =
+    `${platformLabel(state.aliasTarget.platform)} · ${state.aliasTarget.name} (${state.aliasTarget.symbol})`;
+  const input = document.querySelector("#aliasInput");
+  input.value = state.aliasTarget.alias;
+  input.setCustomValidity("");
+  document.querySelector("#aliasDeleteButton").hidden = !state.aliasTarget.alias;
+  document.querySelector("#aliasDialog").showModal();
+  input.focus();
+});
+
+document.querySelector("#aliasForm").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  if (!state.aliasTarget) return;
+
+  const input = document.querySelector("#aliasInput");
+  const alias = input.value.trim();
+  if (!alias) {
+    input.setCustomValidity("별칭을 입력해 주세요.");
+    input.reportValidity();
+    return;
+  }
+
+  input.setCustomValidity("");
+  const path = aliasApiPath(state.aliasTarget);
+  try {
+    await api(path, { method: "PUT", body: JSON.stringify({ alias }) });
+    closeAliasDialog();
+    await refresh();
+  } catch (error) {
+    input.setCustomValidity(error.message);
+    input.reportValidity();
+  }
+});
+
+document.querySelector("#aliasDeleteButton").addEventListener("click", async () => {
+  if (!state.aliasTarget) return;
+  await api(aliasApiPath(state.aliasTarget), { method: "DELETE" });
+  closeAliasDialog();
+  await refresh();
+});
+
+function aliasApiPath(target) {
+  return `/api/asset-aliases/${encodeURIComponent(target.platform)}/${encodeURIComponent(target.symbol)}`;
+}
+
+function closeAliasDialog() {
+  document.querySelector("#aliasDialog").close();
+  state.aliasTarget = null;
+}
+
+document.querySelector("#aliasDialogClose").addEventListener("click", closeAliasDialog);
+document.querySelector("#aliasCancelButton").addEventListener("click", closeAliasDialog);
+document.querySelector("#aliasDialog").addEventListener("click", (event) => {
+  if (event.target === event.currentTarget) closeAliasDialog();
+});
+
 document.querySelector("#strategyForm").addEventListener("submit", async (event) => {
   event.preventDefault();
   const form = event.currentTarget;
@@ -341,5 +640,5 @@ document.querySelector("#strategiesTable").addEventListener("click", async (even
 });
 
 refresh().catch((error) => {
-  document.body.innerHTML = `<main><section class="section"><h2>초기화 실패</h2><p>${error.message}</p></section></main>`;
+  document.body.innerHTML = `<main><section class="section"><h2>초기화 실패</h2><p>${escapeHtml(error.message)}</p></section></main>`;
 });

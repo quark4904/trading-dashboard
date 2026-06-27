@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
-from app.config import DB_PATH
+from app.config import DB_PATH, env_flag
 
 
 def utc_now() -> str:
@@ -19,10 +20,15 @@ class Repository:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._init_db()
 
-    def connect(self) -> sqlite3.Connection:
+    @contextmanager
+    def connect(self) -> Iterator[sqlite3.Connection]:
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
-        return conn
+        try:
+            with conn:
+                yield conn
+        finally:
+            conn.close()
 
     def _init_db(self) -> None:
         with self.connect() as conn:
@@ -71,10 +77,38 @@ class Repository:
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
+
+                CREATE TABLE IF NOT EXISTS sync_runs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    platform TEXT NOT NULL,
+                    started_at TEXT NOT NULL,
+                    completed_at TEXT,
+                    status TEXT NOT NULL,
+                    synced_count INTEGER,
+                    error TEXT
+                );
+
+                CREATE TABLE IF NOT EXISTS asset_aliases (
+                    platform TEXT NOT NULL,
+                    symbol TEXT NOT NULL,
+                    alias TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (platform, symbol)
+                );
+
+                CREATE TABLE IF NOT EXISTS exchange_rates (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    pair TEXT NOT NULL,
+                    rate REAL,
+                    source TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    fetched_at TEXT NOT NULL,
+                    error TEXT
+                );
                 """
             )
             count = conn.execute("SELECT COUNT(*) FROM holdings").fetchone()[0]
-            if count == 0:
+            if count == 0 and env_flag("TRADING_DASHBOARD_SEED_DEMO"):
                 self._seed(conn)
 
     def _seed(self, conn: sqlite3.Connection) -> None:
@@ -117,7 +151,17 @@ class Repository:
 
     def holdings(self) -> list[dict[str, Any]]:
         with self.connect() as conn:
-            return [dict(row) for row in conn.execute("SELECT * FROM holdings ORDER BY platform, symbol")]
+            rows = conn.execute(
+                """
+                SELECT holdings.*, asset_aliases.alias
+                FROM holdings
+                LEFT JOIN asset_aliases
+                  ON asset_aliases.platform = holdings.platform
+                 AND asset_aliases.symbol = holdings.symbol
+                ORDER BY holdings.platform, holdings.symbol
+                """
+            )
+            return [dict(row) for row in rows]
 
     def replace_platform_holdings(self, platform: str, rows: list[dict[str, Any]]) -> int:
         now = utc_now()
@@ -145,6 +189,154 @@ class Repository:
                 ],
             )
             return len(rows)
+
+    def start_sync(self, platform: str) -> int:
+        with self.connect() as conn:
+            cursor = conn.execute(
+                """
+                INSERT INTO sync_runs (platform, started_at, status)
+                VALUES (?, ?, 'running')
+                """,
+                (platform, utc_now()),
+            )
+            return int(cursor.lastrowid)
+
+    def finish_sync(
+        self,
+        sync_id: int,
+        *,
+        status: str,
+        synced_count: int | None = None,
+        error: str | None = None,
+    ) -> dict[str, Any]:
+        with self.connect() as conn:
+            conn.execute(
+                """
+                UPDATE sync_runs
+                SET completed_at = ?, status = ?, synced_count = ?, error = ?
+                WHERE id = ?
+                """,
+                (utc_now(), status, synced_count, error, sync_id),
+            )
+            row = conn.execute("SELECT * FROM sync_runs WHERE id = ?", (sync_id,)).fetchone()
+            if not row:
+                raise RuntimeError(f"sync run {sync_id} not found")
+            return dict(row)
+
+    def latest_sync_runs(self) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT runs.*
+                FROM sync_runs AS runs
+                JOIN (
+                    SELECT platform, MAX(id) AS id
+                    FROM sync_runs
+                    GROUP BY platform
+                ) AS latest ON latest.id = runs.id
+                ORDER BY runs.platform
+                """
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def recent_sync_runs(self, limit: int = 50) -> list[dict[str, Any]]:
+        safe_limit = max(1, min(int(limit), 200))
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT *
+                FROM sync_runs
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (safe_limit,),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def asset_aliases(self) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM asset_aliases ORDER BY platform, symbol"
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def set_asset_alias(self, platform: str, symbol: str, alias: str) -> dict[str, Any]:
+        now = utc_now()
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO asset_aliases (platform, symbol, alias, updated_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(platform, symbol) DO UPDATE SET
+                    alias = excluded.alias,
+                    updated_at = excluded.updated_at
+                """,
+                (platform, symbol, alias, now),
+            )
+            row = conn.execute(
+                "SELECT * FROM asset_aliases WHERE platform = ? AND symbol = ?",
+                (platform, symbol),
+            ).fetchone()
+            return dict(row)
+
+    def delete_asset_alias(self, platform: str, symbol: str) -> bool:
+        with self.connect() as conn:
+            cursor = conn.execute(
+                "DELETE FROM asset_aliases WHERE platform = ? AND symbol = ?",
+                (platform, symbol),
+            )
+            return cursor.rowcount > 0
+
+    def record_exchange_rate(
+        self,
+        *,
+        pair: str,
+        rate: float | None,
+        source: str,
+        status: str,
+        error: str | None = None,
+    ) -> dict[str, Any]:
+        with self.connect() as conn:
+            cursor = conn.execute(
+                """
+                INSERT INTO exchange_rates (pair, rate, source, status, fetched_at, error)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (pair, rate, source, status, utc_now(), error),
+            )
+            row = conn.execute(
+                "SELECT * FROM exchange_rates WHERE id = ?",
+                (cursor.lastrowid,),
+            ).fetchone()
+            return dict(row)
+
+    def latest_exchange_rate(self, pair: str = "USD/KRW") -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT *
+                FROM exchange_rates
+                WHERE pair = ?
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (pair,),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def latest_successful_exchange_rate(self, pair: str = "USD/KRW") -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT *
+                FROM exchange_rates
+                WHERE pair = ? AND status = 'success' AND rate IS NOT NULL
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (pair,),
+            ).fetchone()
+            return dict(row) if row else None
 
     def orders(self) -> list[dict[str, Any]]:
         with self.connect() as conn:

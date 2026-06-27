@@ -1,0 +1,213 @@
+from __future__ import annotations
+
+import os
+import tempfile
+import unittest
+from datetime import date
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
+
+from app.config import api_key_expirations
+from app.integrations.fx import FxError, usd_krw_rate
+from app.repository import Repository
+from app.services import TradingService
+from app.validation import validate_strategy
+
+
+class RepositoryTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.previous_seed = os.environ.pop("TRADING_DASHBOARD_SEED_DEMO", None)
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.db_path = Path(self.temp_dir.name) / "dashboard.db"
+
+    def tearDown(self) -> None:
+        if self.previous_seed is not None:
+            os.environ["TRADING_DASHBOARD_SEED_DEMO"] = self.previous_seed
+        else:
+            os.environ.pop("TRADING_DASHBOARD_SEED_DEMO", None)
+        self.temp_dir.cleanup()
+
+    def test_new_database_is_empty_by_default(self) -> None:
+        repo = Repository(self.db_path)
+
+        self.assertEqual(repo.holdings(), [])
+        self.assertEqual(repo.strategies(), [])
+
+    def test_demo_seed_requires_explicit_flag(self) -> None:
+        os.environ["TRADING_DASHBOARD_SEED_DEMO"] = "true"
+
+        repo = Repository(self.db_path)
+
+        self.assertGreater(len(repo.holdings()), 0)
+        self.assertGreater(len(repo.strategies()), 0)
+
+    def test_sync_run_is_persisted(self) -> None:
+        repo = Repository(self.db_path)
+        sync_id = repo.start_sync("upbit")
+
+        run = repo.finish_sync(sync_id, status="success", synced_count=3)
+
+        self.assertEqual(run["status"], "success")
+        self.assertEqual(run["synced_count"], 3)
+        self.assertEqual(repo.latest_sync_runs()[0]["platform"], "upbit")
+        self.assertEqual(repo.recent_sync_runs()[0]["id"], sync_id)
+
+    def test_asset_alias_survives_holding_replacement(self) -> None:
+        repo = Repository(self.db_path)
+        row = {
+            "symbol": "SCHD",
+            "name": "SCHD",
+            "asset_type": "stock",
+            "quantity": 1,
+            "avg_price": 10,
+            "current_price": 11,
+            "currency": "USD",
+        }
+        repo.set_asset_alias("toss", "SCHD", "슈왑 미국 배당주 ETF")
+        repo.replace_platform_holdings("toss", [row])
+        repo.replace_platform_holdings("toss", [row])
+
+        holding = repo.holdings()[0]
+
+        self.assertEqual(holding["alias"], "슈왑 미국 배당주 ETF")
+        self.assertTrue(repo.delete_asset_alias("toss", "SCHD"))
+        self.assertIsNone(repo.holdings()[0]["alias"])
+
+
+class ApiKeyExpirationTests(unittest.TestCase):
+    def test_expiration_statuses(self) -> None:
+        values = {
+            "UPBIT_KEY_EXPIRES_ON": "invalid-date",
+            "TOSSINVEST_KEY_EXPIRES_ON": "2026-08-01",
+            "KIS_PENSION_KEY_EXPIRES_ON": "2026-07-10",
+            "KIS_ISA_KEY_EXPIRES_ON": "2026-06-01",
+        }
+
+        with patch.dict(os.environ, values):
+            results = {item["platform"]: item for item in api_key_expirations(date(2026, 6, 27))}
+
+        self.assertEqual(results["upbit"]["status"], "invalid")
+        self.assertEqual(results["toss"]["status"], "valid")
+        self.assertEqual(results["kis_pension"]["status"], "warning")
+        self.assertEqual(results["kis_isa"]["status"], "expired")
+
+
+class ValidationTests(unittest.TestCase):
+    def test_strategy_is_normalized(self) -> None:
+        result = validate_strategy(
+            {
+                "name": "  월간 리밸런싱  ",
+                "strategy_type": "rebalance",
+                "budget": "1000",
+                "enabled": True,
+            }
+        )
+
+        self.assertEqual(result["name"], "월간 리밸런싱")
+        self.assertEqual(result["budget"], 1000)
+        self.assertTrue(result["enabled"])
+
+    def test_strategy_rejects_invalid_numbers(self) -> None:
+        for budget in [-1, "nan", "not-a-number"]:
+            with self.subTest(budget=budget), self.assertRaises(ValueError):
+                validate_strategy({"name": "테스트", "budget": budget})
+
+
+class ExchangeRateTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.repo = Repository(Path(self.temp_dir.name) / "dashboard.db")
+
+    def tearDown(self) -> None:
+        self.temp_dir.cleanup()
+
+    def test_uses_last_successful_rate_when_fetch_fails(self) -> None:
+        self.repo.record_exchange_rate(
+            pair="USD/KRW",
+            rate=1350,
+            source="test",
+            status="success",
+        )
+
+        with (
+            patch.dict(os.environ, {"USD_KRW_RATE": ""}),
+            patch("app.integrations.fx.urlopen", side_effect=OSError("offline")),
+        ):
+            result = usd_krw_rate(self.repo)
+
+        self.assertEqual(result["rate"], 1350)
+        self.assertEqual(result["status"], "stale")
+        self.assertEqual(result["source"], "cached")
+
+    def test_fails_without_a_cached_rate(self) -> None:
+        with (
+            patch.dict(os.environ, {"USD_KRW_RATE": ""}),
+            patch("app.integrations.fx.urlopen", side_effect=OSError("offline")),
+            self.assertRaises(FxError),
+        ):
+            usd_krw_rate(self.repo)
+
+        self.assertEqual(self.repo.latest_exchange_rate()["status"], "failed")
+
+
+class SyncIsolationTests(unittest.TestCase):
+    def setUp(self) -> None:
+        os.environ.pop("TRADING_DASHBOARD_SEED_DEMO", None)
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.repo = Repository(Path(self.temp_dir.name) / "dashboard.db")
+        self.service = TradingService(self.repo)
+        self.repo.replace_platform_holdings(
+            "upbit",
+            [
+                {
+                    "symbol": "KRW-BTC",
+                    "name": "비트코인",
+                    "asset_type": "crypto",
+                    "quantity": 1,
+                    "avg_price": 100,
+                    "current_price": 110,
+                    "currency": "KRW",
+                }
+            ],
+        )
+
+    def tearDown(self) -> None:
+        self.temp_dir.cleanup()
+
+    def test_failed_sync_preserves_existing_holdings(self) -> None:
+        def fail() -> dict:
+            raise RuntimeError("temporary failure")
+
+        result = self.service._run_sync("upbit", fail)
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(self.repo.holdings()[0]["symbol"], "KRW-BTC")
+        latest = self.repo.latest_sync_runs()[0]
+        self.assertEqual(latest["status"], "failed")
+        self.assertEqual(latest["error"], "temporary failure")
+
+    def test_kis_accounts_sync_independently(self) -> None:
+        accounts = [
+            SimpleNamespace(platform="kis_pension"),
+            SimpleNamespace(platform="kis_isa"),
+        ]
+
+        def sync_account(account) -> dict:
+            if account.platform == "kis_pension":
+                raise RuntimeError("pension unavailable")
+            return {"platform": account.platform, "synced_count": 0, "holdings": []}
+
+        with (
+            patch("app.services.kis_accounts", return_value=accounts),
+            patch.object(self.service, "_sync_kis_account", side_effect=sync_account),
+        ):
+            result = self.service.sync_kis_holdings()
+
+        self.assertEqual(result["status"], "partial")
+        self.assertFalse(result["ok"])
+        self.assertEqual([item["status"] for item in result["results"]], ["failed", "success"])
+
+
+if __name__ == "__main__":
+    unittest.main()

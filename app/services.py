@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from typing import Any
+from typing import Any, Callable
 
 from app.config import platform_configs
 from app.integrations.fx import usd_krw_rate
@@ -90,6 +90,7 @@ class TradingService:
             valuation_status = _valuation_status(item, value)
             enriched = {
                 **item,
+                "display_name": item.get("alias") or item["name"],
                 "cost": cost,
                 "value": value,
                 "pnl": pnl,
@@ -122,10 +123,14 @@ class TradingService:
                 "total": sum(item["amount"] for item in cash_by_platform.values()),
                 "by_platform": list(cash_by_platform.values()),
             },
+            "exchange_rate": self.repo.latest_exchange_rate(),
             "dust_value_threshold": DUST_VALUE_THRESHOLD,
         }
 
     def sync_upbit_holdings(self) -> dict[str, Any]:
+        return self._run_sync("upbit", self._sync_upbit_holdings)
+
+    def _sync_upbit_holdings(self) -> dict[str, Any]:
         client = UpbitClient()
         accounts = client.accounts()
         markets = client.markets()
@@ -197,49 +202,61 @@ class TradingService:
         for account in kis_accounts():
             if platform and account.platform != platform:
                 continue
-            client = KISClient(account)
-            data = client.domestic_balance()
-            rows = []
-            cash_amount = _kis_orderable_cash(data)
-            if cash_amount > 0:
-                rows.append(
-                    {
-                        "symbol": "KRW",
-                        "name": "주문 가능 현금",
-                        "asset_type": "cash",
-                        "quantity": cash_amount,
-                        "avg_price": 1,
-                        "current_price": 1,
-                        "currency": "KRW",
-                    }
+            results.append(
+                self._run_sync(
+                    account.platform,
+                    lambda account=account: self._sync_kis_account(account),
                 )
-            for item in data.get("output1", []):
-                quantity = _to_float(item.get("hldg_qty"))
-                if quantity <= 0:
-                    continue
-                avg_price = _to_float(item.get("pchs_avg_pric"))
-                current_price = _to_float(item.get("prpr"))
-                if current_price <= 0 and quantity:
-                    current_price = _to_float(item.get("evlu_amt")) / quantity
-                rows.append(
-                    {
-                        "symbol": item.get("pdno") or "UNKNOWN",
-                        "name": item.get("prdt_name") or item.get("prdt_abrv_name") or item.get("pdno") or "UNKNOWN",
-                        "asset_type": "stock",
-                        "quantity": quantity,
-                        "avg_price": avg_price,
-                        "current_price": current_price or avg_price,
-                        "currency": "KRW",
-                    }
-                )
-            count = self.repo.replace_platform_holdings(account.platform, rows)
-            results.append({"platform": account.platform, "synced_count": count, "holdings": rows})
-        return {"results": results}
+            )
+        return _group_sync_results(results)
+
+    def _sync_kis_account(self, account) -> dict[str, Any]:
+        client = KISClient(account)
+        data = client.domestic_balance()
+        rows = []
+        cash_amount = _kis_orderable_cash(data)
+        if cash_amount > 0:
+            rows.append(
+                {
+                    "symbol": "KRW",
+                    "name": "주문 가능 현금",
+                    "asset_type": "cash",
+                    "quantity": cash_amount,
+                    "avg_price": 1,
+                    "current_price": 1,
+                    "currency": "KRW",
+                }
+            )
+        for item in data.get("output1", []):
+            quantity = _to_float(item.get("hldg_qty"))
+            if quantity <= 0:
+                continue
+            avg_price = _to_float(item.get("pchs_avg_pric"))
+            current_price = _to_float(item.get("prpr"))
+            if current_price <= 0 and quantity:
+                current_price = _to_float(item.get("evlu_amt")) / quantity
+            rows.append(
+                {
+                    "symbol": item.get("pdno") or "UNKNOWN",
+                    "name": item.get("prdt_name") or item.get("prdt_abrv_name") or item.get("pdno") or "UNKNOWN",
+                    "asset_type": "stock",
+                    "quantity": quantity,
+                    "avg_price": avg_price,
+                    "current_price": current_price or avg_price,
+                    "currency": "KRW",
+                }
+            )
+        count = self.repo.replace_platform_holdings(account.platform, rows)
+        return {"platform": account.platform, "synced_count": count, "holdings": rows}
 
     def sync_toss_holdings(self) -> dict[str, Any]:
+        return self._run_sync("toss", self._sync_toss_holdings)
+
+    def _sync_toss_holdings(self) -> dict[str, Any]:
         client = TossInvestClient()
         data = client.holdings()
-        fx_rate = usd_krw_rate()
+        exchange_rate = usd_krw_rate(self.repo)
+        fx_rate = float(exchange_rate["rate"])
         rows = []
         krw_power = _to_float((client.buying_power("KRW").get("result") or {}).get("cashBuyingPower"))
         usd_power = _to_float((client.buying_power("USD").get("result") or {}).get("cashBuyingPower"))
@@ -274,20 +291,64 @@ class TradingService:
                 }
             )
         count = self.repo.replace_platform_holdings("toss", rows)
-        return {"platform": "toss", "synced_count": count, "fx_usd_krw": fx_rate, "holdings": rows}
+        return {
+            "platform": "toss",
+            "synced_count": count,
+            "fx_usd_krw": fx_rate,
+            "exchange_rate": exchange_rate,
+            "holdings": rows,
+        }
 
     def sync_all_holdings(self) -> dict[str, Any]:
-        results = []
-        for source, sync in [
-            ("upbit", self.sync_upbit_holdings),
-            ("kis", self.sync_kis_holdings),
-            ("toss", self.sync_toss_holdings),
-        ]:
-            try:
-                results.append({"source": source, "ok": True, "result": sync()})
-            except Exception as exc:
-                results.append({"source": source, "ok": False, "error": str(exc)})
-        return {"results": results}
+        results = [
+            {"source": "upbit", **self.sync_upbit_holdings()},
+            {"source": "kis", **self.sync_kis_holdings()},
+            {"source": "toss", **self.sync_toss_holdings()},
+        ]
+        statuses = [item["status"] for item in results]
+        if all(status == "success" for status in statuses):
+            status = "success"
+        elif all(status == "failed" for status in statuses):
+            status = "failed"
+        else:
+            status = "partial"
+        return {"ok": status == "success", "status": status, "results": results}
+
+    def _run_sync(self, platform: str, sync: Callable[[], dict[str, Any]]) -> dict[str, Any]:
+        sync_id = self.repo.start_sync(platform)
+        try:
+            result = sync()
+        except Exception as exc:
+            run = self.repo.finish_sync(sync_id, status="failed", error=str(exc))
+            return {
+                "platform": platform,
+                "ok": False,
+                "status": "failed",
+                "error": str(exc),
+                "started_at": run["started_at"],
+                "completed_at": run["completed_at"],
+            }
+
+        count = int(result.get("synced_count", 0))
+        run = self.repo.finish_sync(sync_id, status="success", synced_count=count)
+        return {
+            **result,
+            "ok": True,
+            "status": "success",
+            "started_at": run["started_at"],
+            "completed_at": run["completed_at"],
+        }
+
+
+def _group_sync_results(results: list[dict[str, Any]]) -> dict[str, Any]:
+    succeeded = sum(item["ok"] for item in results)
+    if not results or succeeded == 0:
+        status = "failed"
+    elif succeeded == len(results):
+        status = "success"
+    else:
+        status = "partial"
+    return {"ok": status == "success", "status": status, "results": results}
 
 
 def _to_float(value: Any) -> float:

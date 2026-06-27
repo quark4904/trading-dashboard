@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 
 
@@ -21,6 +22,13 @@ def load_env(path: Path = ENV_PATH) -> None:
         key = key.strip()
         value = value.strip().strip('"').strip("'")
         os.environ.setdefault(key, value)
+
+
+def env_flag(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
 @dataclass(frozen=True)
@@ -47,13 +55,23 @@ def platform_configs() -> list[PlatformConfig]:
             code="kis_pension",
             name=os.getenv("KIS_PENSION_LABEL", "한국투자증권 연금"),
             category=os.getenv("KIS_PENSION_CATEGORY", "stock"),
-            required_env=("KIS_PENSION_APP_KEY", "KIS_PENSION_APP_SECRET", "KIS_PENSION_ACCOUNT_NO"),
+            required_env=(
+                "KIS_PENSION_APP_KEY",
+                "KIS_PENSION_APP_SECRET",
+                "KIS_PENSION_ACCOUNT_NO",
+                "KIS_PENSION_ACCOUNT_PRODUCT_CODE",
+            ),
         ),
         PlatformConfig(
             code="kis_isa",
             name=os.getenv("KIS_ISA_LABEL", "한국투자증권 ISA"),
             category=os.getenv("KIS_ISA_CATEGORY", "stock"),
-            required_env=("KIS_ISA_APP_KEY", "KIS_ISA_APP_SECRET", "KIS_ISA_ACCOUNT_NO"),
+            required_env=(
+                "KIS_ISA_APP_KEY",
+                "KIS_ISA_APP_SECRET",
+                "KIS_ISA_ACCOUNT_NO",
+                "KIS_ISA_ACCOUNT_PRODUCT_CODE",
+            ),
         ),
         PlatformConfig(
             code="upbit",
@@ -62,6 +80,68 @@ def platform_configs() -> list[PlatformConfig]:
             required_env=("UPBIT_ACCESS_KEY", "UPBIT_SECRET_KEY"),
         ),
     ]
+
+
+def api_key_expirations(today: date | None = None) -> list[dict[str, str | int | None]]:
+    today = today or date.today()
+    configs = [
+        ("upbit", "업비트", ("UPBIT_KEY_EXPIRES_ON", "UPBIT_API_KEY_EXPIRES_AT")),
+        (
+            "toss",
+            os.getenv("TOSSINVEST_ACCOUNT_LABEL", "토스증권"),
+            ("TOSSINVEST_KEY_EXPIRES_ON", "TOSSINVEST_API_KEY_EXPIRES_AT"),
+        ),
+        (
+            "kis_pension",
+            os.getenv("KIS_PENSION_LABEL", "한국투자증권 연금"),
+            ("KIS_PENSION_KEY_EXPIRES_ON", "KIS_PENSION_API_KEY_EXPIRES_AT"),
+        ),
+        (
+            "kis_isa",
+            os.getenv("KIS_ISA_LABEL", "한국투자증권 ISA"),
+            ("KIS_ISA_KEY_EXPIRES_ON", "KIS_ISA_API_KEY_EXPIRES_AT"),
+        ),
+    ]
+    results = []
+    for platform, name, env_names in configs:
+        value = next((os.getenv(env_name, "").strip() for env_name in env_names if os.getenv(env_name, "").strip()), "")
+        if not value:
+            results.append(
+                {
+                    "platform": platform,
+                    "name": name,
+                    "expires_at": None,
+                    "days_remaining": None,
+                    "status": "unknown",
+                }
+            )
+            continue
+        try:
+            expires_at = date.fromisoformat(value)
+        except ValueError:
+            results.append(
+                {
+                    "platform": platform,
+                    "name": name,
+                    "expires_at": value,
+                    "days_remaining": None,
+                    "status": "invalid",
+                }
+            )
+            continue
+
+        days_remaining = (expires_at - today).days
+        status = "expired" if days_remaining < 0 else "warning" if days_remaining <= 30 else "valid"
+        results.append(
+            {
+                "platform": platform,
+                "name": name,
+                "expires_at": expires_at.isoformat(),
+                "days_remaining": days_remaining,
+                "status": status,
+            }
+        )
+    return results
 
 
 load_env()

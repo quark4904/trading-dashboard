@@ -25,13 +25,15 @@
           <h2>손익 현황</h2>
           <div class="actions">
             <button id="syncAllButton" type="button">전체 동기화</button>
-            <button id="syncUpbitButton" class="secondary" type="button">업비트 동기화</button>
-            <button id="syncKisButton" class="secondary" type="button">한국투자 동기화</button>
-            <button id="syncTossButton" class="secondary" type="button">토스 동기화</button>
+            <button id="syncStatusButton" class="sync-status-badge unknown" type="button">
+              <span class="status-indicator"></span>
+              <span>동기화 미확인</span>
+            </button>
             <button id="refreshButton" type="button">로컬 데이터 새로고침</button>
           </div>
         </div>
         <div id="syncMessage" class="message"></div>
+        <div id="fxMessage" class="fx-message"></div>
         <div id="summaryCards" class="metrics"></div>
         <h3>주문 가능 현금</h3>
         <div id="cashCards" class="cash-grid"></div>
@@ -96,6 +98,60 @@
         <div id="ordersTable" class="table"></div>
       </section>
     </main>
+
+    <dialog id="syncStatusDialog" class="sync-dialog" aria-labelledby="syncDialogTitle">
+      <div class="sync-dialog-header">
+        <div>
+          <h2 id="syncDialogTitle">동기화 상태</h2>
+          <p id="syncDialogSummary">아직 동기화 기록이 없습니다.</p>
+        </div>
+        <button id="syncDialogClose" class="dialog-close" type="button" aria-label="닫기">×</button>
+      </div>
+      <div class="sync-dialog-actions">
+        <button id="syncUpbitButton" class="secondary" type="button">업비트 동기화</button>
+        <button id="syncKisButton" class="secondary" type="button">한국투자 동기화</button>
+        <button id="syncTossButton" class="secondary" type="button">토스 동기화</button>
+      </div>
+      <div class="sync-subsection-header">
+        <h3>API 키 만료일</h3>
+        <span>30일 전부터 주의</span>
+      </div>
+      <div id="apiKeyCards" class="api-key-grid"></div>
+      <div class="sync-subsection-header">
+        <h3>플랫폼별 최신 상태</h3>
+      </div>
+      <div id="syncPlatformCards" class="sync-platform-grid"></div>
+      <div class="sync-history-header">
+        <h3>최근 실행 이력</h3>
+        <span>최근 50건</span>
+      </div>
+      <div id="syncHistory" class="sync-history"></div>
+    </dialog>
+
+    <dialog id="aliasDialog" class="alias-dialog" aria-labelledby="aliasDialogTitle">
+      <form id="aliasForm">
+        <div class="sync-dialog-header">
+          <div>
+            <h2 id="aliasDialogTitle">자산 별칭 편집</h2>
+            <p id="aliasAssetInfo"></p>
+          </div>
+          <button id="aliasDialogClose" class="dialog-close" type="button" aria-label="닫기">×</button>
+        </div>
+        <div class="alias-form-body">
+          <label>
+            한글 별칭
+            <input id="aliasInput" name="alias" maxlength="100" placeholder="예: 슈왑 미국 배당주 ETF" required />
+          </label>
+          <p>비워두거나 삭제하면 API에서 받은 원래 종목명이 표시됩니다.</p>
+        </div>
+        <div class="alias-dialog-actions">
+          <button id="aliasDeleteButton" class="danger-button" type="button">별칭 삭제</button>
+          <button id="aliasCancelButton" class="secondary" type="button">취소</button>
+          <button type="submit">저장</button>
+        </div>
+      </form>
+    </dialog>
+
     <script src="/app.js"></script>
   </body>
 </html>

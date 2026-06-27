@@ -67,6 +67,32 @@ docker compose down
 - 전략 추가 및 활성/중지 관리
 - 전략 실행 로그 조회
 - SQLite 기반 전략/실행 기록 저장
+- 플랫폼별 동기화 성공·실패 이력 저장
+- 계좌별 독립 동기화 및 부분 실패 표시
+- 자산별 사용자 한글 별칭 등록·수정·삭제
+- USD/KRW 환율 이력 저장 및 조회 실패 시 마지막 정상값 사용
+- 전략·별칭 API 입력 검증과 동적 HTML 이스케이프
+
+## 데모 데이터
+
+새 데이터베이스는 기본적으로 빈 상태로 생성됩니다. 개발용 샘플 자산과 전략이 필요할 때만 아래 환경 변수를 설정합니다.
+
+```bash
+TRADING_DASHBOARD_SEED_DEMO=true python3 -m app.main
+```
+
+## API 키 만료일
+
+동기화 상태 모달에서 만료일까지 남은 기간을 확인하려면 `.env`에 `YYYY-MM-DD` 형식으로 설정합니다.
+
+```dotenv
+UPBIT_KEY_EXPIRES_ON=2027-01-01
+TOSSINVEST_KEY_EXPIRES_ON=2027-01-01
+KIS_PENSION_KEY_EXPIRES_ON=2027-01-01
+KIS_ISA_KEY_EXPIRES_ON=2027-01-01
+```
+
+만료 30일 전부터 주의 상태로 표시됩니다. 설정하지 않은 플랫폼은 `만료일 미설정`으로 표시됩니다.
 
 ## 다음 단계
 
