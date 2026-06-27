@@ -420,3 +420,8 @@ class Repository:
             item["enabled"] = bool(item["enabled"])
             item["params"] = json.loads(item.pop("params_json") or "{}")
             return item
+
+    def delete_strategy(self, strategy_id: int) -> bool:
+        with self.connect() as conn:
+            cursor = conn.execute("DELETE FROM strategies WHERE id = ?", (strategy_id,))
+            return cursor.rowcount > 0

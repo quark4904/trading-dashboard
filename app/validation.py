@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import re
 
 from app.config import platform_configs
 
@@ -13,7 +14,7 @@ def validate_strategy(data: dict) -> dict:
         raise ValueError("전략 이름은 100자 이하여야 합니다.")
 
     strategy_type = str(data.get("strategy_type") or "custom")
-    if strategy_type not in {"rebalance", "momentum", "mean_reversion", "custom"}:
+    if strategy_type not in {"dca", "rebalance", "momentum", "mean_reversion", "custom"}:
         raise ValueError("지원하지 않는 전략 유형입니다.")
 
     platform = str(data.get("platform") or "").strip()
@@ -28,14 +29,62 @@ def validate_strategy(data: dict) -> dict:
     if budget < 0:
         raise ValueError("예산은 0 이상이어야 합니다.")
 
+    params = data.get("params") if isinstance(data.get("params"), dict) else {}
+    if strategy_type == "dca":
+        if not platform:
+            raise ValueError("DCA 전략의 플랫폼을 선택하세요.")
+        raw_items = params.get("items")
+        if isinstance(raw_items, list):
+            items = []
+            for raw_item in raw_items:
+                if not isinstance(raw_item, dict):
+                    raise ValueError("DCA 자산 설정을 확인하세요.")
+                item_symbol = str(raw_item.get("symbol") or "").strip().upper()
+                raw_value = raw_item.get("value")
+                if raw_value is None:
+                    raw_value = raw_item.get("quantity") if raw_item.get("order_type") == "quantity" else raw_item.get("amount", raw_item.get("amount_usd"))
+                item_value = validated_number(raw_value, f"{item_symbol or 'DCA 자산'} 주문 값")
+                market = str(raw_item.get("market") or "overseas")
+                items.append(normalize_dca_item(platform, item_symbol, item_value, market))
+        else:
+            legacy_value = params.get("quantity", 1) if platform.startswith("kis_") else params.get("amount_usd", 1)
+            legacy_value = validated_number(legacy_value, "종목당 주문 값")
+            items = [
+                normalize_dca_item(platform, item.strip().upper(), legacy_value)
+                for item in symbol.split(",")
+                if item.strip()
+            ]
+        if not items:
+            raise ValueError("DCA 종목 코드를 하나 이상 입력하세요.")
+        symbols = [item["symbol"] for item in items]
+        if len(items) > 20 or any(not item.replace(".", "").replace("-", "").isalnum() for item in symbols):
+            raise ValueError("DCA 종목 코드를 확인하세요. 최대 20개까지 입력할 수 있습니다.")
+        if any(dca_item_value(item) <= 0 for item in items):
+            raise ValueError("자산별 주문 값은 0보다 커야 합니다.")
+        if len(set(symbols)) != len(symbols):
+            raise ValueError("DCA 전략에 같은 종목을 중복해서 입력할 수 없습니다.")
+        interval = str(params.get("interval") or "daily")
+        if interval not in {"daily", "weekly", "monthly"}:
+            raise ValueError("지원하지 않는 DCA 실행 주기입니다.")
+        execution_time = str(params.get("execution_time") or "23:30")
+        match = re.fullmatch(r"(\d{2}):(\d{2})", execution_time)
+        if not match or int(match.group(1)) > 23 or int(match.group(2)) > 59:
+            raise ValueError("실행 시간은 HH:MM 형식이어야 합니다.")
+        symbol = ",".join(symbols)
+        params = {
+            "items": items,
+            "interval": interval,
+            "execution_time": execution_time,
+        }
+
     result = {
         "name": name,
         "strategy_type": strategy_type,
-        "enabled": data.get("enabled") is True,
+        "enabled": False,
         "platform": platform,
         "symbol": symbol,
         "budget": budget,
-        "params": data.get("params") if isinstance(data.get("params"), dict) else {},
+        "params": params,
     }
     for key, label in [("take_profit_pct", "익절률"), ("stop_loss_pct", "손절률")]:
         value = data.get(key)
@@ -52,3 +101,24 @@ def validated_number(value, label: str) -> float:
     if not math.isfinite(number):
         raise ValueError(f"{label}은 유한한 숫자여야 합니다.")
     return number
+
+
+def normalize_dca_item(platform: str, symbol: str, value: float, market: str = "overseas") -> dict:
+    if platform == "toss" and market not in {"domestic", "overseas"}:
+        raise ValueError("토스증권 시장 구분을 확인하세요.")
+    if platform in {"kis_pension", "kis_isa"} or (platform == "toss" and market == "domestic"):
+        if not value.is_integer():
+            raise ValueError("국내주식 매수 수량은 정수여야 합니다.")
+        item = {"symbol": symbol, "order_type": "quantity", "quantity": int(value)}
+        if platform == "toss":
+            item["market"] = "domestic"
+        return item
+    currency = "KRW" if platform == "upbit" else "USD"
+    item = {"symbol": symbol, "order_type": "amount", "amount": value, "currency": currency}
+    if platform == "toss":
+        item["market"] = "overseas"
+    return item
+
+
+def dca_item_value(item: dict) -> float:
+    return float(item["quantity"] if item["order_type"] == "quantity" else item["amount"])

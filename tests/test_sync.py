@@ -74,6 +74,24 @@ class RepositoryTests(unittest.TestCase):
         self.assertTrue(repo.delete_asset_alias("toss", "SCHD"))
         self.assertIsNone(repo.holdings()[0]["alias"])
 
+    def test_strategy_can_be_deleted(self) -> None:
+        repo = Repository(self.db_path)
+        strategy = repo.create_strategy(
+            {
+                "name": "삭제 테스트",
+                "strategy_type": "custom",
+                "enabled": False,
+                "platform": "",
+                "symbol": "",
+                "budget": 0,
+                "params": {},
+            }
+        )
+
+        self.assertTrue(repo.delete_strategy(strategy["id"]))
+        self.assertEqual(repo.strategies(), [])
+        self.assertFalse(repo.delete_strategy(strategy["id"]))
+
 
 class ApiKeyExpirationTests(unittest.TestCase):
     def test_expiration_statuses(self) -> None:
@@ -106,12 +124,147 @@ class ValidationTests(unittest.TestCase):
 
         self.assertEqual(result["name"], "월간 리밸런싱")
         self.assertEqual(result["budget"], 1000)
-        self.assertTrue(result["enabled"])
+        self.assertFalse(result["enabled"])
 
     def test_strategy_rejects_invalid_numbers(self) -> None:
         for budget in [-1, "nan", "not-a-number"]:
             with self.subTest(budget=budget), self.assertRaises(ValueError):
                 validate_strategy({"name": "테스트", "budget": budget})
+
+    def test_dca_normalizes_asset_specific_amounts(self) -> None:
+        result = validate_strategy(
+            {
+                "name": "매일 1달러",
+                "strategy_type": "dca",
+                "platform": "toss",
+                "params": {
+                    "items": [
+                        {"symbol": " schd ", "market": "overseas", "value": "1"},
+                        {"symbol": "VT", "market": "overseas", "value": "2"},
+                    ],
+                    "interval": "daily",
+                    "execution_time": "22:30",
+                },
+            }
+        )
+
+        self.assertEqual(result["symbol"], "SCHD,VT")
+        self.assertEqual(
+            result["params"],
+            {
+                "items": [
+                    {"symbol": "SCHD", "order_type": "amount", "amount": 1, "currency": "USD", "market": "overseas"},
+                    {"symbol": "VT", "order_type": "amount", "amount": 2, "currency": "USD", "market": "overseas"},
+                ],
+                "interval": "daily",
+                "execution_time": "22:30",
+            },
+        )
+
+    def test_dca_rejects_duplicate_symbols(self) -> None:
+        with self.assertRaisesRegex(ValueError, "중복"):
+            validate_strategy(
+                {
+                    "name": "중복 DCA",
+                    "strategy_type": "dca",
+                    "platform": "toss",
+                    "params": {
+                        "items": [
+                            {"symbol": "SCHD", "value": 1},
+                            {"symbol": "schd", "value": 2},
+                        ]
+                    },
+                }
+            )
+
+    def test_dca_requires_platform_and_symbols(self) -> None:
+        for platform, symbol in [("", "SCHD"), ("toss", "")]:
+            with self.subTest(platform=platform, symbol=symbol), self.assertRaises(ValueError):
+                validate_strategy(
+                    {
+                        "name": "DCA",
+                        "strategy_type": "dca",
+                        "platform": platform,
+                        "symbol": symbol,
+                    }
+                )
+
+    def test_dca_supports_other_platforms(self) -> None:
+        result = validate_strategy(
+            {
+                "name": "한투 DCA",
+                "strategy_type": "dca",
+                "platform": "kis_isa",
+                "symbol": "458730",
+            }
+        )
+
+        self.assertEqual(result["platform"], "kis_isa")
+        self.assertEqual(
+            result["params"]["items"],
+            [{"symbol": "458730", "order_type": "quantity", "quantity": 1}],
+        )
+
+    def test_domestic_dca_requires_integer_quantity(self) -> None:
+        with self.assertRaisesRegex(ValueError, "정수"):
+            validate_strategy(
+                {
+                    "name": "국내 DCA",
+                    "strategy_type": "dca",
+                    "platform": "kis_isa",
+                    "params": {"items": [{"symbol": "458730", "value": 1.5}]},
+                }
+            )
+
+    def test_toss_supports_domestic_quantity_and_overseas_amount(self) -> None:
+        result = validate_strategy(
+            {
+                "name": "토스 혼합 DCA",
+                "strategy_type": "dca",
+                "platform": "toss",
+                "params": {
+                    "items": [
+                        {"symbol": "005930", "market": "domestic", "value": 2},
+                        {"symbol": "SCHD", "market": "overseas", "value": 1},
+                    ]
+                },
+            }
+        )
+
+        self.assertEqual(
+            result["params"]["items"],
+            [
+                {"symbol": "005930", "order_type": "quantity", "quantity": 2, "market": "domestic"},
+                {"symbol": "SCHD", "order_type": "amount", "amount": 1, "currency": "USD", "market": "overseas"},
+            ],
+        )
+
+    def test_upbit_dca_uses_krw_amount(self) -> None:
+        result = validate_strategy(
+            {
+                "name": "업비트 DCA",
+                "strategy_type": "dca",
+                "platform": "upbit",
+                "params": {"items": [{"symbol": "KRW-BTC", "value": 5000}]},
+            }
+        )
+
+        self.assertEqual(
+            result["params"]["items"],
+            [{"symbol": "KRW-BTC", "order_type": "amount", "amount": 5000, "currency": "KRW"}],
+        )
+
+    def test_dca_rejects_invalid_execution_time(self) -> None:
+        with self.assertRaisesRegex(ValueError, "HH:MM"):
+            validate_strategy(
+                {
+                    "name": "DCA",
+                    "strategy_type": "dca",
+                    "platform": "toss",
+                    "symbol": "SCHD",
+                    "params": {"execution_time": "25:00"},
+                }
+            )
 
 
 class ExchangeRateTests(unittest.TestCase):

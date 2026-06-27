@@ -13,8 +13,9 @@
         <p>DRY_RUN MVP</p>
       </div>
       <nav>
-        <a href="#portfolio">포트폴리오</a>
-        <a href="#strategies">전략</a>
+        <a href="#portfolio">손익 현황</a>
+        <a href="#strategies">전략 관리</a>
+        <a href="#holdings">보유 자산</a>
         <a href="#activity">실행 로그</a>
       </nav>
     </aside>
@@ -47,8 +48,38 @@
             <div id="platformStatus" class="status-list"></div>
           </div>
         </div>
-        <div class="asset-header">
-          <h3>보유 자산</h3>
+      </section>
+
+      <section id="strategies" class="section">
+        <div class="section-title">
+          <h2>전략 관리</h2>
+          <span class="pill">자동 실행 전 준비 단계</span>
+        </div>
+        <form id="strategyForm" class="form-grid">
+          <label>전략명<input name="name" placeholder="예: BTC 추세 추종" required /></label>
+          <label>유형<select name="strategy_type"><option value="dca">DCA</option><option value="rebalance">리밸런싱</option><option value="momentum">모멘텀</option><option value="mean_reversion">평균회귀</option><option value="custom">커스텀</option></select></label>
+          <label>플랫폼<select name="platform"></select></label>
+          <label data-standard-field>종목 코드<input name="symbol" placeholder="비워두면 전체" /></label>
+          <div id="dcaItemsEditor" class="dca-items-editor" data-dca-field>
+            <div class="dca-items-header">
+              <strong id="dcaItemsTitle">매수 자산별 주문 설정</strong>
+              <button id="addDcaItemButton" class="secondary" type="button">자산 추가</button>
+            </div>
+            <div id="dcaItemRows" class="dca-item-rows"></div>
+          </div>
+          <label data-dca-field>실행 주기<select name="interval"><option value="daily">매일</option><option value="weekly">매주</option><option value="monthly">매월</option></select></label>
+          <label data-dca-field>실행 시간 (KST)<input name="execution_time" type="time" value="23:30" required /></label>
+          <label data-standard-field>예산 (KRW)<input name="budget" type="number" step="1" min="0" value="0" /></label>
+          <label data-standard-field>익절 %<input name="take_profit_pct" type="number" step="0.1" /></label>
+          <label data-standard-field>손절 %<input name="stop_loss_pct" type="number" step="0.1" /></label>
+          <button type="submit">전략 추가</button>
+        </form>
+        <div id="strategiesTable" class="table"></div>
+      </section>
+
+      <section id="holdings" class="section">
+        <div class="section-title">
+          <h2>보유 자산</h2>
           <span id="assetCount" class="pill">0개</span>
         </div>
         <div class="filters">
@@ -69,25 +100,6 @@
           <button id="smallAssetsToggle" class="secondary" type="button">펼치기</button>
         </div>
         <div id="smallSymbolTable" class="table hidden"></div>
-      </section>
-
-      <section id="strategies" class="section">
-        <div class="section-title">
-          <h2>전략 관리</h2>
-          <span class="pill">자동 실행 전 준비 단계</span>
-        </div>
-        <form id="strategyForm" class="form-grid">
-          <label>전략명<input name="name" placeholder="예: BTC 추세 추종" required /></label>
-          <label>유형<select name="strategy_type"><option value="rebalance">리밸런싱</option><option value="momentum">모멘텀</option><option value="mean_reversion">평균회귀</option><option value="custom">커스텀</option></select></label>
-          <label>플랫폼<select name="platform"></select></label>
-          <label>종목 코드<input name="symbol" placeholder="비워두면 전체" /></label>
-          <label>예산<input name="budget" type="number" step="1" min="0" value="0" /></label>
-          <label>익절 %<input name="take_profit_pct" type="number" step="0.1" /></label>
-          <label>손절 %<input name="stop_loss_pct" type="number" step="0.1" /></label>
-          <label class="toggle"><input name="enabled" type="checkbox" /> 활성화</label>
-          <button type="submit">전략 추가</button>
-        </form>
-        <div id="strategiesTable" class="table"></div>
       </section>
 
       <section id="activity" class="section">

@@ -125,6 +125,18 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_DELETE(self) -> None:
         parsed = urlparse(self.path)
+        if parsed.path.startswith("/api/strategies/"):
+            parts = parsed.path.strip("/").split("/")
+            if len(parts) != 3:
+                return self.json_response({"error": "not found"}, status=404)
+            try:
+                strategy_id = int(parts[2])
+            except ValueError:
+                return self.json_response({"error": "잘못된 전략 ID입니다."}, status=400)
+            if not repo.delete_strategy(strategy_id):
+                return self.json_response({"error": "not found"}, status=404)
+            return self.json_response({"deleted": True})
+
         alias_target = parse_alias_target(parsed.path)
         if not alias_target:
             return self.json_response({"error": "not found"}, status=404)

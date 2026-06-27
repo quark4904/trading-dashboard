@@ -88,6 +88,7 @@ function renderPlatforms() {
     .map((p) => `<option value="${escapeHtml(p.code)}">${escapeHtml(p.name)}</option>`)
     .join("");
   document.querySelector('#strategyForm select[name="platform"]').innerHTML = `<option value="">전체</option>${options}`;
+  updateStrategyFields();
   const assetFilter = document.querySelector("#assetPlatformFilter");
   const currentValue = assetFilter.value || "all";
   assetFilter.innerHTML = `<option value="all">전체 플랫폼</option>${options}`;
@@ -286,22 +287,59 @@ async function renderOrders() {
 async function renderStrategies() {
   const strategies = await api("/api/strategies");
   document.querySelector("#strategiesTable").innerHTML = table(
-    ["상태", "전략", "유형", "대상", "예산", "익절", "손절", "작업"],
+    ["상태", "전략", "유형", "대상", "매수 설정", "익절", "손절", "작업"],
     strategies.map(
       (item) => `
         <tr>
           <td>${item.enabled ? "활성" : "중지"}</td>
           <td>${escapeHtml(item.name)}</td>
-          <td>${escapeHtml(item.strategy_type)}</td>
-          <td>${escapeHtml(item.platform ? platformLabel(item.platform) : "전체")} ${escapeHtml(item.symbol || "")}</td>
-          <td>${won.format(item.budget || 0)}</td>
+          <td>${item.strategy_type === "dca" ? "DCA" : escapeHtml(item.strategy_type)}</td>
+          <td>${escapeHtml(item.platform ? platformLabel(item.platform) : "전체")} ${item.strategy_type === "dca"
+            ? escapeHtml(dcaItems(item, item.platform).map((entry) => `${entry.symbol} ${dcaItemValueLabel(entry)}`).join(", "))
+            : escapeHtml(item.symbol || "")}</td>
+          <td>${item.strategy_type === "dca"
+            ? `${intervalLabel(item.params?.interval)} ${escapeHtml(item.params?.execution_time || "23:30")} KST`
+            : won.format(item.budget || 0)}</td>
           <td>${item.take_profit_pct ?? "-"}%</td>
           <td>${item.stop_loss_pct ?? "-"}%</td>
-          <td><button class="secondary" data-strategy="${escapeHtml(item.id)}" data-enabled="${!item.enabled}">${item.enabled ? "중지" : "활성"}</button></td>
+          <td class="strategy-actions">
+            <button class="secondary" data-strategy="${escapeHtml(item.id)}" data-action="toggle" data-enabled="${!item.enabled}">${item.enabled ? "중지" : "활성"}</button>
+            <button class="danger-button" data-strategy="${escapeHtml(item.id)}" data-action="delete" data-name="${escapeHtml(item.name)}">삭제</button>
+          </td>
         </tr>
       `,
     ),
   );
+}
+
+function dcaItems(strategy, platform) {
+  if (Array.isArray(strategy.params?.items)) return strategy.params.items;
+  return String(strategy.symbol || "")
+    .split(",")
+    .filter(Boolean)
+    .map((symbol) => platform === "kis_pension" || platform === "kis_isa"
+      ? { symbol, order_type: "quantity", quantity: strategy.params?.quantity || 1 }
+      : { symbol, order_type: "amount", amount: strategy.params?.amount_usd || 1, currency: platform === "upbit" ? "KRW" : "USD" });
+}
+
+function dcaItemValueLabel(item) {
+  if (item.order_type === "quantity") return `${number.format(item.quantity)}주`;
+  const currency = item.currency || "USD";
+  return currency === "USD" ? `$${number.format(item.amount ?? item.amount_usd)}` : `${won.format(item.amount)}`;
+}
+
+function dcaOrderSpec(platform, market = "overseas") {
+  if (platform === "kis_pension" || platform === "kis_isa" || (platform === "toss" && market === "domestic")) {
+    return { orderType: "quantity", label: "매수 수량 (주)", title: "자산별 매수 수량", step: "1", min: "1" };
+  }
+  if (platform === "upbit") {
+    return { orderType: "amount", currency: "KRW", label: "매수 금액 (KRW)", title: "자산별 매수 금액 (KRW)", step: "1", min: "1" };
+  }
+  return { orderType: "amount", currency: "USD", label: "매수 금액 (USD)", title: "자산별 매수 금액 (USD)", step: "0.01", min: "0.01" };
+}
+
+function intervalLabel(interval) {
+  return { daily: "매일", weekly: "매주", monthly: "매월" }[interval] ?? interval;
 }
 
 async function refresh() {
@@ -325,8 +363,72 @@ function formObject(form) {
     if (data[key] === "") delete data[key];
     else if (data[key] !== undefined) data[key] = Number(data[key]);
   }
-  data.enabled = form.querySelector('[name="enabled"]')?.checked ?? false;
+  if (data.strategy_type === "dca") {
+    const items = [...form.querySelectorAll(".dca-item-row")].map((row) => ({
+      symbol: row.querySelector('[data-dca-input="symbol"]').value,
+      market: row.querySelector('[data-dca-input="market"]').value,
+      value: Number(row.querySelector('[data-dca-input="value"]').value),
+    }));
+    data.symbol = items.map((item) => item.symbol).join(",");
+    data.budget = 0;
+    delete data.take_profit_pct;
+    delete data.stop_loss_pct;
+    data.params = {
+      items,
+      interval: data.interval,
+      execution_time: data.execution_time,
+    };
+  }
+  delete data.interval;
+  delete data.execution_time;
+  data.enabled = false;
   return data;
+}
+
+function updateStrategyFields() {
+  const form = document.querySelector("#strategyForm");
+  const isDca = form.elements.strategy_type.value === "dca";
+  form.querySelectorAll("[data-dca-field]").forEach((element) => element.classList.toggle("hidden", !isDca));
+  form.querySelectorAll("[data-standard-field]").forEach((element) => element.classList.toggle("hidden", isDca));
+  updateDcaOrderFields();
+}
+
+function updateDcaOrderFields() {
+  const form = document.querySelector("#strategyForm");
+  const platform = form.elements.platform.value;
+  document.querySelector("#dcaItemsTitle").textContent = platform === "toss"
+    ? "자산별 시장 및 주문 설정"
+    : dcaOrderSpec(platform).title;
+  for (const row of form.querySelectorAll(".dca-item-row")) {
+    const marketLabel = row.querySelector("[data-dca-market-label]");
+    const marketInput = row.querySelector('[data-dca-input="market"]');
+    marketLabel.classList.toggle("hidden", platform !== "toss");
+    const spec = dcaOrderSpec(platform, marketInput.value);
+    const label = row.querySelector("[data-dca-value-label]");
+    const input = row.querySelector('[data-dca-input="value"]');
+    label.childNodes[0].textContent = spec.label;
+    input.step = spec.step;
+    input.min = spec.min;
+    if (spec.orderType === "quantity" && !Number.isInteger(Number(input.value))) input.value = "1";
+  }
+}
+
+function addDcaItemRow(symbol = "", value = 1) {
+  const row = document.createElement("div");
+  row.className = "dca-item-row";
+  row.innerHTML = `
+    <label>종목 코드<input data-dca-input="symbol" value="${escapeHtml(symbol)}" placeholder="예: SCHD" required /></label>
+    <label data-dca-market-label>시장<select data-dca-input="market"><option value="overseas">해외주식</option><option value="domestic">국내주식</option></select></label>
+    <label data-dca-value-label>주문 값<input data-dca-input="value" type="number" value="${escapeHtml(value)}" required /></label>
+    <button class="danger-button" data-remove-dca-item type="button">삭제</button>
+  `;
+  document.querySelector("#dcaItemRows").append(row);
+  updateDcaOrderFields();
+}
+
+function resetDcaItems() {
+  document.querySelector("#dcaItemRows").replaceChildren();
+  addDcaItemRow();
 }
 
 document.querySelector("#refreshButton").addEventListener("click", refresh);
@@ -629,12 +731,35 @@ document.querySelector("#strategyForm").addEventListener("submit", async (event)
   const form = event.currentTarget;
   await api("/api/strategies", { method: "POST", body: JSON.stringify(formObject(form)) });
   form.reset();
+  resetDcaItems();
+  updateStrategyFields();
   await renderStrategies();
 });
+
+document.querySelector('#strategyForm select[name="strategy_type"]').addEventListener("change", updateStrategyFields);
+document.querySelector('#strategyForm select[name="platform"]').addEventListener("change", updateDcaOrderFields);
+document.querySelector("#addDcaItemButton").addEventListener("click", () => addDcaItemRow());
+document.querySelector("#dcaItemRows").addEventListener("click", (event) => {
+  const button = event.target.closest("[data-remove-dca-item]");
+  if (!button) return;
+  if (document.querySelectorAll(".dca-item-row").length === 1) return;
+  button.closest(".dca-item-row").remove();
+});
+document.querySelector("#dcaItemRows").addEventListener("change", (event) => {
+  if (event.target.matches('[data-dca-input="market"]')) updateDcaOrderFields();
+});
+
+resetDcaItems();
 
 document.querySelector("#strategiesTable").addEventListener("click", async (event) => {
   const button = event.target.closest("[data-strategy]");
   if (!button) return;
+  if (button.dataset.action === "delete") {
+    if (!window.confirm(`"${button.dataset.name}" 전략을 삭제할까요?`)) return;
+    await api(`/api/strategies/${button.dataset.strategy}`, { method: "DELETE" });
+    await renderStrategies();
+    return;
+  }
   await api(`/api/strategies/${button.dataset.strategy}/enabled?value=${button.dataset.enabled}`, { method: "PATCH" });
   await renderStrategies();
 });
