@@ -255,7 +255,7 @@ class TradingService:
     def _sync_toss_holdings(self) -> dict[str, Any]:
         client = TossInvestClient()
         data = client.holdings()
-        exchange_rate = usd_krw_rate(self.repo)
+        exchange_rate = usd_krw_rate(self.repo, client)
         fx_rate = float(exchange_rate["rate"])
         rows = []
         krw_power = _to_float((client.buying_power("KRW").get("result") or {}).get("cashBuyingPower"))

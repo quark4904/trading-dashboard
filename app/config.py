@@ -48,7 +48,7 @@ def platform_configs() -> list[PlatformConfig]:
         PlatformConfig(
             code="toss",
             name=os.getenv("TOSSINVEST_ACCOUNT_LABEL", "토스증권"),
-            category=os.getenv("TOSSINVEST_ACCOUNT_CATEGORY", "stock"),
+            category=os.getenv("TOSSINVEST_ACCOUNT_CATEGORY", "주식(해외/국내)"),
             required_env=("TOSSINVEST_CLIENT_ID", "TOSSINVEST_CLIENT_SECRET", "TOSSINVEST_ACCOUNT_SEQ"),
         ),
         PlatformConfig(

@@ -6,12 +6,13 @@ import unittest
 from datetime import date
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from app.config import api_key_expirations
 from app.integrations.fx import FxError, usd_krw_rate
 from app.repository import Repository
 from app.services import TradingService
+from app.strategy_capabilities import compile_dca_buy_request, strategy_capabilities
 from app.validation import validate_strategy
 
 
@@ -91,6 +92,36 @@ class RepositoryTests(unittest.TestCase):
         self.assertTrue(repo.delete_strategy(strategy["id"]))
         self.assertEqual(repo.strategies(), [])
         self.assertFalse(repo.delete_strategy(strategy["id"]))
+
+    def test_strategy_can_be_updated_without_changing_enabled_state(self) -> None:
+        repo = Repository(self.db_path)
+        strategy = repo.create_strategy(
+            {
+                "name": "수정 전",
+                "strategy_type": "custom",
+                "enabled": False,
+                "platform": "",
+                "symbol": "",
+                "budget": 0,
+                "params": {},
+            }
+        )
+        repo.set_strategy_enabled(strategy["id"], True)
+
+        updated = repo.update_strategy(
+            strategy["id"],
+            {
+                "name": "수정 후",
+                "strategy_type": "custom",
+                "platform": "toss",
+                "symbol": "SCHD",
+                "budget": 100,
+                "params": {},
+            },
+        )
+
+        self.assertEqual(updated["name"], "수정 후")
+        self.assertTrue(updated["enabled"])
 
 
 class ApiKeyExpirationTests(unittest.TestCase):
@@ -202,7 +233,7 @@ class ValidationTests(unittest.TestCase):
         self.assertEqual(result["platform"], "kis_isa")
         self.assertEqual(
             result["params"]["items"],
-            [{"symbol": "458730", "order_type": "quantity", "quantity": 1}],
+            [{"symbol": "458730", "market": "domestic", "order_type": "quantity", "currency": "KRW", "quantity": 1}],
         )
 
     def test_domestic_dca_requires_integer_quantity(self) -> None:
@@ -234,8 +265,8 @@ class ValidationTests(unittest.TestCase):
         self.assertEqual(
             result["params"]["items"],
             [
-                {"symbol": "005930", "order_type": "quantity", "quantity": 2, "market": "domestic"},
-                {"symbol": "SCHD", "order_type": "amount", "amount": 1, "currency": "USD", "market": "overseas"},
+                {"symbol": "005930", "market": "domestic", "order_type": "quantity", "currency": "KRW", "quantity": 2},
+                {"symbol": "SCHD", "market": "overseas", "order_type": "amount", "currency": "USD", "amount": 1},
             ],
         )
 
@@ -251,7 +282,50 @@ class ValidationTests(unittest.TestCase):
 
         self.assertEqual(
             result["params"]["items"],
-            [{"symbol": "KRW-BTC", "order_type": "amount", "amount": 5000, "currency": "KRW"}],
+            [{"symbol": "KRW-BTC", "market": "crypto", "order_type": "amount", "currency": "KRW", "amount": 5000}],
+        )
+
+
+class StrategyCapabilityTests(unittest.TestCase):
+    def test_capabilities_describe_platform_specific_inputs(self) -> None:
+        platforms = strategy_capabilities()["platforms"]
+
+        self.assertEqual(platforms["toss"]["markets"]["overseas"]["order_mode"], "amount")
+        self.assertEqual(platforms["toss"]["markets"]["domestic"]["order_mode"], "quantity")
+        self.assertEqual(platforms["kis_isa"]["markets"]["domestic"]["integer_only"], True)
+        self.assertEqual(platforms["upbit"]["markets"]["crypto"]["value_min"], 5000)
+
+    def test_compiles_toss_amount_order(self) -> None:
+        request = compile_dca_buy_request(
+            "toss",
+            {"symbol": "SCHD", "market": "overseas", "order_type": "amount", "amount": 1, "currency": "USD"},
+        )
+
+        self.assertEqual(
+            request["body"],
+            {"symbol": "SCHD", "side": "BUY", "orderType": "MARKET", "orderAmount": "1"},
+        )
+
+    def test_compiles_kis_domestic_market_order(self) -> None:
+        request = compile_dca_buy_request(
+            "kis_isa",
+            {"symbol": "458730", "market": "domestic", "order_type": "quantity", "quantity": 2, "currency": "KRW"},
+        )
+
+        self.assertEqual(request["body"]["ORD_DVSN"], "01")
+        self.assertEqual(request["body"]["ORD_QTY"], "2")
+        self.assertEqual(request["body"]["ORD_UNPR"], "0")
+        self.assertEqual(request["body"]["EXCG_ID_DVSN_CD"], "KRX")
+
+    def test_compiles_upbit_market_buy(self) -> None:
+        request = compile_dca_buy_request(
+            "upbit",
+            {"symbol": "KRW-BTC", "market": "crypto", "order_type": "amount", "amount": 5000, "currency": "KRW"},
+        )
+
+        self.assertEqual(
+            request["body"],
+            {"market": "KRW-BTC", "side": "bid", "ord_type": "price", "price": "5000"},
         )
 
     def test_dca_rejects_invalid_execution_time(self) -> None:
@@ -292,6 +366,46 @@ class ExchangeRateTests(unittest.TestCase):
         self.assertEqual(result["rate"], 1350)
         self.assertEqual(result["status"], "stale")
         self.assertEqual(result["source"], "cached")
+
+    def test_prefers_toss_rate(self) -> None:
+        client = SimpleNamespace(
+            exchange_rate=lambda base, quote: {
+                "result": {
+                    "baseCurrency": base,
+                    "quoteCurrency": quote,
+                    "rate": "1380.5",
+                    "midRate": "1375",
+                    "basisPoint": "40",
+                    "validUntil": "2026-03-25T09:31:00+09:00",
+                }
+            }
+        )
+
+        with (
+            patch.dict(os.environ, {"USD_KRW_RATE": ""}),
+            patch("app.integrations.fx.urlopen") as er_api,
+        ):
+            result = usd_krw_rate(self.repo, client)
+
+        self.assertEqual(result["rate"], 1380.5)
+        self.assertEqual(result["source"], "tossinvest")
+        self.assertEqual(result["details"]["mid_rate"], 1375)
+        self.assertEqual(result["details"]["basis_point"], 40)
+        er_api.assert_not_called()
+
+    def test_falls_back_to_er_api_when_toss_fetch_fails(self) -> None:
+        client = SimpleNamespace(exchange_rate=lambda base, quote: (_ for _ in ()).throw(RuntimeError("offline")))
+        response = MagicMock()
+        response.__enter__.return_value.read.return_value = b'{"rates":{"KRW":1375.25}}'
+
+        with (
+            patch.dict(os.environ, {"USD_KRW_RATE": ""}),
+            patch("app.integrations.fx.urlopen", return_value=response),
+        ):
+            result = usd_krw_rate(self.repo, client)
+
+        self.assertEqual(result["rate"], 1375.25)
+        self.assertEqual(result["source"], "open.er-api.com")
 
     def test_fails_without_a_cached_rate(self) -> None:
         with (

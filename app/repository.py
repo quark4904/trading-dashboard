@@ -103,10 +103,16 @@ class Repository:
                     source TEXT NOT NULL,
                     status TEXT NOT NULL,
                     fetched_at TEXT NOT NULL,
-                    error TEXT
+                    error TEXT,
+                    details_json TEXT NOT NULL DEFAULT '{}'
                 );
                 """
             )
+            exchange_rate_columns = {
+                row["name"] for row in conn.execute("PRAGMA table_info(exchange_rates)").fetchall()
+            }
+            if "details_json" not in exchange_rate_columns:
+                conn.execute("ALTER TABLE exchange_rates ADD COLUMN details_json TEXT NOT NULL DEFAULT '{}'")
             count = conn.execute("SELECT COUNT(*) FROM holdings").fetchone()[0]
             if count == 0 and env_flag("TRADING_DASHBOARD_SEED_DEMO"):
                 self._seed(conn)
@@ -295,20 +301,27 @@ class Repository:
         source: str,
         status: str,
         error: str | None = None,
+        details: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         with self.connect() as conn:
             cursor = conn.execute(
                 """
-                INSERT INTO exchange_rates (pair, rate, source, status, fetched_at, error)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO exchange_rates (pair, rate, source, status, fetched_at, error, details_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
-                (pair, rate, source, status, utc_now(), error),
+                (pair, rate, source, status, utc_now(), error, json.dumps(details or {}, ensure_ascii=False)),
             )
             row = conn.execute(
                 "SELECT * FROM exchange_rates WHERE id = ?",
                 (cursor.lastrowid,),
             ).fetchone()
-            return dict(row)
+            return self._exchange_rate_row(row)
+
+    @staticmethod
+    def _exchange_rate_row(row: sqlite3.Row) -> dict[str, Any]:
+        result = dict(row)
+        result["details"] = json.loads(result.pop("details_json") or "{}")
+        return result
 
     def latest_exchange_rate(self, pair: str = "USD/KRW") -> dict[str, Any] | None:
         with self.connect() as conn:
@@ -322,7 +335,7 @@ class Repository:
                 """,
                 (pair,),
             ).fetchone()
-            return dict(row) if row else None
+            return self._exchange_rate_row(row) if row else None
 
     def latest_successful_exchange_rate(self, pair: str = "USD/KRW") -> dict[str, Any] | None:
         with self.connect() as conn:
@@ -336,7 +349,7 @@ class Repository:
                 """,
                 (pair,),
             ).fetchone()
-            return dict(row) if row else None
+            return self._exchange_rate_row(row) if row else None
 
     def orders(self) -> list[dict[str, Any]]:
         with self.connect() as conn:
@@ -406,6 +419,38 @@ class Repository:
                 ),
             )
             return {"id": cursor.lastrowid, **request, "created_at": now, "updated_at": now}
+
+    def update_strategy(self, strategy_id: int, request: dict[str, Any]) -> dict[str, Any] | None:
+        now = utc_now()
+        with self.connect() as conn:
+            existing = conn.execute("SELECT enabled, created_at FROM strategies WHERE id = ?", (strategy_id,)).fetchone()
+            if not existing:
+                return None
+            conn.execute(
+                """
+                UPDATE strategies
+                SET name = ?, strategy_type = ?, platform = ?, symbol = ?, budget = ?,
+                    take_profit_pct = ?, stop_loss_pct = ?, params_json = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    request["name"],
+                    request.get("strategy_type", "custom"),
+                    request.get("platform") or None,
+                    request.get("symbol") or None,
+                    float(request.get("budget") or 0),
+                    request.get("take_profit_pct"),
+                    request.get("stop_loss_pct"),
+                    json.dumps(request.get("params") or {}, ensure_ascii=False),
+                    now,
+                    strategy_id,
+                ),
+            )
+            row = conn.execute("SELECT * FROM strategies WHERE id = ?", (strategy_id,)).fetchone()
+            item = dict(row)
+            item["enabled"] = bool(item["enabled"])
+            item["params"] = json.loads(item.pop("params_json") or "{}")
+            return item
 
     def set_strategy_enabled(self, strategy_id: int, enabled: bool) -> dict[str, Any] | None:
         with self.connect() as conn:

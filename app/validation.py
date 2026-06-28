@@ -4,6 +4,7 @@ import math
 import re
 
 from app.config import platform_configs
+from app.strategy_capabilities import dca_market_capability
 
 
 def validate_strategy(data: dict) -> dict:
@@ -44,7 +45,8 @@ def validate_strategy(data: dict) -> dict:
                 if raw_value is None:
                     raw_value = raw_item.get("quantity") if raw_item.get("order_type") == "quantity" else raw_item.get("amount", raw_item.get("amount_usd"))
                 item_value = validated_number(raw_value, f"{item_symbol or 'DCA 자산'} 주문 값")
-                market = str(raw_item.get("market") or "overseas")
+                market_value = raw_item.get("market")
+                market = str(market_value) if market_value else None
                 items.append(normalize_dca_item(platform, item_symbol, item_value, market))
         else:
             legacy_value = params.get("quantity", 1) if platform.startswith("kis_") else params.get("amount_usd", 1)
@@ -103,20 +105,22 @@ def validated_number(value, label: str) -> float:
     return number
 
 
-def normalize_dca_item(platform: str, symbol: str, value: float, market: str = "overseas") -> dict:
-    if platform == "toss" and market not in {"domestic", "overseas"}:
-        raise ValueError("토스증권 시장 구분을 확인하세요.")
-    if platform in {"kis_pension", "kis_isa"} or (platform == "toss" and market == "domestic"):
-        if not value.is_integer():
-            raise ValueError("국내주식 매수 수량은 정수여야 합니다.")
-        item = {"symbol": symbol, "order_type": "quantity", "quantity": int(value)}
-        if platform == "toss":
-            item["market"] = "domestic"
-        return item
-    currency = "KRW" if platform == "upbit" else "USD"
-    item = {"symbol": symbol, "order_type": "amount", "amount": value, "currency": currency}
-    if platform == "toss":
-        item["market"] = "overseas"
+def normalize_dca_item(platform: str, symbol: str, value: float, market: str | None = None) -> dict:
+    selected_market, capability = dca_market_capability(platform, market)
+    if value < float(capability["value_min"]):
+        raise ValueError(f"{capability['value_label']}은 {capability['value_min']} 이상이어야 합니다.")
+    if capability["integer_only"] and not value.is_integer():
+        raise ValueError(f"{capability['value_label']}은 정수여야 합니다.")
+    item = {
+        "symbol": symbol,
+        "market": selected_market,
+        "order_type": capability["order_mode"],
+        "currency": capability["currency"],
+    }
+    if capability["order_mode"] == "quantity":
+        item["quantity"] = int(value)
+    else:
+        item["amount"] = value
     return item
 
 

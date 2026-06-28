@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import os
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol
 from urllib.request import Request, urlopen
 
 if TYPE_CHECKING:
@@ -13,7 +13,11 @@ class FxError(RuntimeError):
     pass
 
 
-def usd_krw_rate(repo: "Repository") -> dict[str, Any]:
+class TossFxClient(Protocol):
+    def exchange_rate(self, base_currency: str = "USD", quote_currency: str = "KRW") -> dict[str, Any]: ...
+
+
+def usd_krw_rate(repo: "Repository", toss_client: TossFxClient | None = None) -> dict[str, Any]:
     configured = _to_float(os.getenv("USD_KRW_RATE"))
     if configured > 0:
         return repo.record_exchange_rate(
@@ -22,6 +26,28 @@ def usd_krw_rate(repo: "Repository") -> dict[str, Any]:
             source="configured",
             status="success",
         )
+
+    errors: list[str] = []
+    if toss_client is not None:
+        try:
+            data = toss_client.exchange_rate("USD", "KRW")
+            rate = _to_float((data.get("result") or {}).get("rate"))
+            if rate <= 0:
+                raise FxError("토스증권 환율 API 응답에 USD/KRW 값이 없습니다.")
+            return repo.record_exchange_rate(
+                pair="USD/KRW",
+                rate=rate,
+                source="tossinvest",
+                status="success",
+                details={
+                    "mid_rate": _to_float((data.get("result") or {}).get("midRate")),
+                    "basis_point": _to_float((data.get("result") or {}).get("basisPoint")),
+                    "valid_from": (data.get("result") or {}).get("validFrom"),
+                    "valid_until": (data.get("result") or {}).get("validUntil"),
+                },
+            )
+        except (OSError, ValueError, FxError, RuntimeError) as exc:
+            errors.append(f"토스증권: {exc}")
 
     try:
         req = Request("https://open.er-api.com/v6/latest/USD", headers={"Accept": "application/json"})
@@ -35,10 +61,15 @@ def usd_krw_rate(repo: "Repository") -> dict[str, Any]:
             rate=rate,
             source="open.er-api.com",
             status="success",
+            details={
+                "provider_updated_at": data.get("time_last_update_utc"),
+                "provider_next_update_at": data.get("time_next_update_utc"),
+            },
         )
     except (OSError, ValueError, FxError) as exc:
+        errors.append(f"ER-API: {exc}")
         cached = repo.latest_successful_exchange_rate()
-        error = str(exc)
+        error = " / ".join(errors)
         if cached:
             return repo.record_exchange_rate(
                 pair="USD/KRW",
@@ -46,6 +77,7 @@ def usd_krw_rate(repo: "Repository") -> dict[str, Any]:
                 source="cached",
                 status="stale",
                 error=error,
+                details=cached.get("details"),
             )
         repo.record_exchange_rate(
             pair="USD/KRW",

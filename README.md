@@ -72,6 +72,11 @@ docker compose down
 - 자산별 사용자 한글 별칭 등록·수정·삭제
 - USD/KRW 환율 이력 저장 및 조회 실패 시 마지막 정상값 사용
 - 전략·별칭 API 입력 검증과 동적 HTML 이스케이프
+- 플랫폼별 주문 capability 기반 DCA 입력·검증
+- 토스·한국투자·업비트용 DRY_RUN 주문 요청 컴파일
+
+플랫폼별 주문 필드와 공식 자료 근거는
+[`docs/platform-order-requirements.md`](docs/platform-order-requirements.md)에 정리되어 있습니다.
 
 ## 데모 데이터
 

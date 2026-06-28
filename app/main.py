@@ -9,6 +9,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 from app.config import ROOT_DIR, api_key_expirations, platform_configs
 from app.repository import Repository
 from app.services import TradingService
+from app.strategy_capabilities import strategy_capabilities
 from app.validation import validate_strategy
 
 
@@ -52,6 +53,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.json_response(repo.orders())
         if parsed.path == "/api/strategies":
             return self.json_response(repo.strategies())
+        if parsed.path == "/api/strategy-capabilities":
+            return self.json_response(strategy_capabilities())
         if parsed.path == "/api/asset-aliases":
             return self.json_response(repo.asset_aliases())
         return self.static_response(parsed.path)
@@ -102,6 +105,20 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_PUT(self) -> None:
         parsed = urlparse(self.path)
+        if parsed.path.startswith("/api/strategies/"):
+            parts = parsed.path.strip("/").split("/")
+            if len(parts) != 3:
+                return self.json_response({"error": "not found"}, status=404)
+            try:
+                strategy_id = int(parts[2])
+                request = validate_strategy(self.read_json())
+            except ValueError as exc:
+                return self.json_response({"error": str(exc)}, status=400)
+            updated = repo.update_strategy(strategy_id, request)
+            if not updated:
+                return self.json_response({"error": "not found"}, status=404)
+            return self.json_response(updated)
+
         alias_target = parse_alias_target(parsed.path)
         if not alias_target:
             return self.json_response({"error": "not found"}, status=404)

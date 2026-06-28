@@ -1,8 +1,12 @@
 const won = new Intl.NumberFormat("ko-KR", { style: "currency", currency: "KRW", maximumFractionDigits: 0 });
 const number = new Intl.NumberFormat("ko-KR", { maximumFractionDigits: 6 });
+const fxNumber = new Intl.NumberFormat("ko-KR", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
 const state = {
   platforms: [],
+  strategyCapabilities: { platforms: {} },
+  strategies: [],
+  editingStrategyId: null,
   summary: null,
   syncStatus: { latest: [], history: [], api_keys: [] },
   aliasTarget: null,
@@ -49,15 +53,17 @@ function escapeHtml(value) {
     .replaceAll("'", "&#039;");
 }
 
-function renderMetrics(total) {
-  document.querySelector("#summaryCards").innerHTML = [
+function renderMetrics(total, exchangeRate) {
+  const metrics = [
     ["평가금액", won.format(total.value)],
     ["매입금액", won.format(total.cost)],
     ["손익", `<span class="${pnlClass(total.pnl)}">${won.format(total.pnl)}</span>`],
     ["수익률", `<span class="${pnlClass(total.pnl)}">${total.pnl_pct.toFixed(2)}%</span>`],
-  ]
+  ];
+  document.querySelector("#summaryCards").innerHTML =
+    metrics
     .map(([label, value]) => `<div class="metric"><span>${label}</span><strong>${value}</strong></div>`)
-    .join("");
+    .join("") + fxCard(exchangeRate);
 }
 
 function table(headers, rows) {
@@ -96,9 +102,8 @@ function renderPlatforms() {
 }
 
 function renderPortfolio(summary) {
-  renderMetrics(summary.total);
+  renderMetrics(summary.total, summary.exchange_rate);
   renderCash(summary.cash);
-  renderFxStatus(summary.exchange_rate);
   document.querySelector("#platformTable").innerHTML = table(
     ["플랫폼", "평가금액", "손익", "수익률"],
     summary.by_platform.map(
@@ -136,44 +141,75 @@ function renderPortfolio(summary) {
   );
 }
 
-function renderFxStatus(exchangeRate) {
-  const element = document.querySelector("#fxMessage");
-  element.className = `fx-message ${exchangeRate?.status || ""}`;
+function fxCard(exchangeRate) {
   if (!exchangeRate) {
-    element.textContent = "USD/KRW 환율 정보 없음";
-    return;
+    return `<div class="metric fx-card unavailable"><span>USD/KRW 환율</span><strong>정보 없음</strong></div>`;
   }
   if (exchangeRate.status === "failed" || exchangeRate.rate == null) {
-    element.textContent = `USD/KRW 환율 조회 실패${exchangeRate.error ? ` · ${exchangeRate.error}` : ""}`;
-    return;
+    return `
+      <div class="metric fx-card failed">
+        <div class="fx-card-heading"><span>USD/KRW 환율</span><span class="fx-badge">조회 실패</span></div>
+        <strong>—</strong>
+        <small>${escapeHtml(exchangeRate.error || "환율 정보를 가져오지 못했습니다.")}</small>
+      </div>`;
   }
 
   const source = {
     configured: "설정값",
-    "open.er-api.com": "실시간 조회",
+    tossinvest: "토스증권",
+    "open.er-api.com": "ER-API",
     cached: "마지막 정상값",
   }[exchangeRate.source] || exchangeRate.source;
-  const stale = exchangeRate.status === "stale" ? " · 조회 실패로 이전 값 사용 중" : "";
-  element.textContent =
-    `USD/KRW ${number.format(exchangeRate.rate)} · ${source} · ${formatSyncTime(new Date(exchangeRate.fetched_at))}${stale}`;
+  const status = exchangeRate.status === "stale" ? "캐시 사용" : exchangeRate.source === "open.er-api.com" ? "대체 환율" : "정상";
+  const details = exchangeRate.details || {};
+  const detailRows = [
+    details.mid_rate > 0 ? ["매매기준율", `₩${fxNumber.format(details.mid_rate)}`] : null,
+    details.basis_point ? ["기준율 차이", `${number.format(details.basis_point)} bp`] : null,
+    details.valid_until ? ["유효 시간", formatSyncTime(new Date(details.valid_until))] : null,
+  ].filter(Boolean);
+  const expandable = detailRows.length
+    ? `<details class="fx-details"><summary>상세 정보</summary>${detailRows
+        .map(([label, value]) => `<div><span>${label}</span><b>${escapeHtml(value)}</b></div>`)
+        .join("")}<p>실제 주문 시 적용 환율과 다를 수 있습니다.</p></details>`
+    : "";
+
+  return `
+    <div class="metric fx-card ${escapeHtml(exchangeRate.status)} source-${escapeHtml(exchangeRate.source)}">
+      <div class="fx-card-heading">
+        <span>USD/KRW 환율</span>
+        <span class="fx-badge">${escapeHtml(status)}</span>
+      </div>
+      <strong>₩${fxNumber.format(exchangeRate.rate)}</strong>
+      <div class="fx-meta"><b>${escapeHtml(source)}</b><span>${formatSyncTime(new Date(exchangeRate.fetched_at))}</span></div>
+      ${expandable}
+    </div>`;
 }
 
 function renderCash(cash) {
-  const items = cash?.by_platform ?? [];
-  const cards = [
-    { platform: "total", name: "전체", amount: cash?.total ?? 0 },
-    ...items.sort((a, b) => b.amount - a.amount),
-  ];
-  document.querySelector("#cashCards").innerHTML = cards
+  const items = (cash?.by_platform ?? []).sort((a, b) => b.amount - a.amount);
+  const platformCards = items
     .map(
       (item) => `
         <div class="cash-card">
-          <span>${escapeHtml(item.name || platformLabel(item.platform))}</span>
+          <span class="cash-card-label">${escapeHtml(item.name || platformLabel(item.platform))}</span>
           <strong>${won.format(item.amount)}</strong>
         </div>
       `,
     )
     .join("");
+  document.querySelector("#cashCards").innerHTML = `
+    <div class="cash-total-card">
+      <div class="cash-total-heading">
+        <span>전체 주문 가능 현금</span>
+        <span class="cash-total-badge">합계</span>
+      </div>
+      <strong>${won.format(cash?.total ?? 0)}</strong>
+      <small>모든 플랫폼의 주문 가능 현금</small>
+    </div>
+    <div class="cash-platforms">
+      <div class="cash-platforms-label">플랫폼별 현금</div>
+      <div class="cash-platform-grid">${platformCards || `<div class="cash-empty">표시할 플랫폼 현금이 없습니다.</div>`}</div>
+    </div>`;
 }
 
 function renderAssetTable() {
@@ -286,30 +322,46 @@ async function renderOrders() {
 
 async function renderStrategies() {
   const strategies = await api("/api/strategies");
-  document.querySelector("#strategiesTable").innerHTML = table(
-    ["상태", "전략", "유형", "대상", "매수 설정", "익절", "손절", "작업"],
-    strategies.map(
-      (item) => `
-        <tr>
-          <td>${item.enabled ? "활성" : "중지"}</td>
-          <td>${escapeHtml(item.name)}</td>
-          <td>${item.strategy_type === "dca" ? "DCA" : escapeHtml(item.strategy_type)}</td>
-          <td>${escapeHtml(item.platform ? platformLabel(item.platform) : "전체")} ${item.strategy_type === "dca"
-            ? escapeHtml(dcaItems(item, item.platform).map((entry) => `${entry.symbol} ${dcaItemValueLabel(entry)}`).join(", "))
-            : escapeHtml(item.symbol || "")}</td>
-          <td>${item.strategy_type === "dca"
-            ? `${intervalLabel(item.params?.interval)} ${escapeHtml(item.params?.execution_time || "23:30")} KST`
-            : won.format(item.budget || 0)}</td>
-          <td>${item.take_profit_pct ?? "-"}%</td>
-          <td>${item.stop_loss_pct ?? "-"}%</td>
-          <td class="strategy-actions">
-            <button class="secondary" data-strategy="${escapeHtml(item.id)}" data-action="toggle" data-enabled="${!item.enabled}">${item.enabled ? "중지" : "활성"}</button>
-            <button class="danger-button" data-strategy="${escapeHtml(item.id)}" data-action="delete" data-name="${escapeHtml(item.name)}">삭제</button>
-          </td>
-        </tr>
-      `,
-    ),
-  );
+  state.strategies = strategies;
+  const activeCount = strategies.filter((item) => item.enabled).length;
+  document.querySelector("#strategyStats").innerHTML = `
+    <span><strong>${activeCount}</strong> 활성</span>
+    <span><strong>${strategies.length - activeCount}</strong> 중지</span>
+    <span><strong>${strategies.length}</strong> 전체</span>
+  `;
+  document.querySelector("#strategiesList").innerHTML = strategies.length
+    ? strategies.map(strategyCard).join("")
+    : `<div class="strategy-empty"><strong>아직 등록된 전략이 없습니다.</strong><span>새 전략을 만들어 투자 계획을 시작하세요.</span></div>`;
+}
+
+function strategyCard(item) {
+  const target = item.strategy_type === "dca"
+    ? dcaItems(item, item.platform).map((entry) => `${entry.symbol} ${dcaItemValueLabel(entry)}`).join(" · ")
+    : item.symbol || "전체 자산";
+  const schedule = item.strategy_type === "dca"
+    ? `${intervalLabel(item.params?.interval)} ${item.params?.execution_time || "23:30"} KST`
+    : `${won.format(item.budget || 0)} 예산`;
+  return `
+    <article class="strategy-card">
+      <div class="strategy-card-main">
+        <div class="strategy-card-title">
+          <span class="strategy-status ${item.enabled ? "active" : ""}">${item.enabled ? "활성" : "중지"}</span>
+          <h3>${escapeHtml(item.name)}</h3>
+        </div>
+        <div class="strategy-meta">
+          <span>${item.strategy_type === "dca" ? "DCA" : escapeHtml(item.strategy_type)}</span>
+          <span>${escapeHtml(item.platform ? platformLabel(item.platform) : "전체")}</span>
+          <span>${escapeHtml(schedule)}</span>
+        </div>
+        <p>${escapeHtml(target)}</p>
+      </div>
+      <div class="strategy-card-actions">
+        <button class="secondary" data-strategy="${escapeHtml(item.id)}" data-action="toggle" data-enabled="${!item.enabled}">${item.enabled ? "중지" : "활성"}</button>
+        <button class="table-action" data-strategy="${escapeHtml(item.id)}" data-action="edit">수정</button>
+        <button class="danger-button" data-strategy="${escapeHtml(item.id)}" data-action="delete" data-name="${escapeHtml(item.name)}">삭제</button>
+      </div>
+    </article>
+  `;
 }
 
 function dcaItems(strategy, platform) {
@@ -329,13 +381,21 @@ function dcaItemValueLabel(item) {
 }
 
 function dcaOrderSpec(platform, market = "overseas") {
-  if (platform === "kis_pension" || platform === "kis_isa" || (platform === "toss" && market === "domestic")) {
-    return { orderType: "quantity", label: "매수 수량 (주)", title: "자산별 매수 수량", step: "1", min: "1" };
+  const platformCapability = state.strategyCapabilities.platforms?.[platform];
+  const selectedMarket = market || platformCapability?.default_market;
+  const capability = platformCapability?.markets?.[selectedMarket];
+  if (!capability) {
+    return { orderType: "amount", currency: "USD", label: "주문 값", title: "자산별 주문 설정", step: "0.01", min: "0.01" };
   }
-  if (platform === "upbit") {
-    return { orderType: "amount", currency: "KRW", label: "매수 금액 (KRW)", title: "자산별 매수 금액 (KRW)", step: "1", min: "1" };
-  }
-  return { orderType: "amount", currency: "USD", label: "매수 금액 (USD)", title: "자산별 매수 금액 (USD)", step: "0.01", min: "0.01" };
+  return {
+    orderType: capability.order_mode,
+    currency: capability.currency,
+    label: capability.value_label,
+    title: Object.keys(platformCapability.markets).length > 1 ? "자산별 시장 및 주문 설정" : `자산별 ${capability.value_label}`,
+    step: String(capability.value_step),
+    min: String(capability.value_min),
+    placeholder: capability.symbol_placeholder,
+  };
 }
 
 function intervalLabel(interval) {
@@ -343,14 +403,16 @@ function intervalLabel(interval) {
 }
 
 async function refresh() {
-  const [platforms, summary, syncStatus] = await Promise.all([
+  const [platforms, summary, syncStatus, strategyCapabilities] = await Promise.all([
     api("/api/platforms"),
     api("/api/portfolio/summary"),
     api("/api/sync/status"),
+    api("/api/strategy-capabilities"),
   ]);
   state.platforms = platforms;
   state.summary = summary;
   state.syncStatus = syncStatus;
+  state.strategyCapabilities = strategyCapabilities;
   renderSyncStatus(syncStatus);
   renderPlatforms();
   renderPortfolio(summary);
@@ -396,16 +458,22 @@ function updateStrategyFields() {
 function updateDcaOrderFields() {
   const form = document.querySelector("#strategyForm");
   const platform = form.elements.platform.value;
-  document.querySelector("#dcaItemsTitle").textContent = platform === "toss"
-    ? "자산별 시장 및 주문 설정"
-    : dcaOrderSpec(platform).title;
+  const platformCapability = state.strategyCapabilities.platforms?.[platform];
+  document.querySelector("#dcaItemsTitle").textContent = dcaOrderSpec(platform, platformCapability?.default_market).title;
   for (const row of form.querySelectorAll(".dca-item-row")) {
     const marketLabel = row.querySelector("[data-dca-market-label]");
     const marketInput = row.querySelector('[data-dca-input="market"]');
-    marketLabel.classList.toggle("hidden", platform !== "toss");
+    const markets = platformCapability?.markets || {};
+    const currentMarket = markets[marketInput.value] ? marketInput.value : platformCapability?.default_market;
+    marketInput.innerHTML = Object.entries(markets)
+      .map(([value, capability]) => `<option value="${escapeHtml(value)}">${escapeHtml(capability.label)}</option>`)
+      .join("");
+    if (currentMarket) marketInput.value = currentMarket;
+    marketLabel.classList.toggle("hidden", Object.keys(markets).length <= 1);
     const spec = dcaOrderSpec(platform, marketInput.value);
     const label = row.querySelector("[data-dca-value-label]");
     const input = row.querySelector('[data-dca-input="value"]');
+    row.querySelector('[data-dca-input="symbol"]').placeholder = spec.placeholder || "종목 코드";
     label.childNodes[0].textContent = spec.label;
     input.step = spec.step;
     input.min = spec.min;
@@ -413,7 +481,7 @@ function updateDcaOrderFields() {
   }
 }
 
-function addDcaItemRow(symbol = "", value = 1) {
+function addDcaItemRow(symbol = "", value = 1, market = "") {
   const row = document.createElement("div");
   row.className = "dca-item-row";
   row.innerHTML = `
@@ -424,6 +492,10 @@ function addDcaItemRow(symbol = "", value = 1) {
   `;
   document.querySelector("#dcaItemRows").append(row);
   updateDcaOrderFields();
+  if (market) {
+    row.querySelector('[data-dca-input="market"]').value = market;
+    updateDcaOrderFields();
+  }
 }
 
 function resetDcaItems() {
@@ -729,21 +801,90 @@ document.querySelector("#aliasDialog").addEventListener("click", (event) => {
 document.querySelector("#strategyForm").addEventListener("submit", async (event) => {
   event.preventDefault();
   const form = event.currentTarget;
-  await api("/api/strategies", { method: "POST", body: JSON.stringify(formObject(form)) });
-  form.reset();
-  resetDcaItems();
-  updateStrategyFields();
+  const path = state.editingStrategyId ? `/api/strategies/${state.editingStrategyId}` : "/api/strategies";
+  await api(path, { method: state.editingStrategyId ? "PUT" : "POST", body: JSON.stringify(formObject(form)) });
+  closeStrategyDialog();
   await renderStrategies();
 });
 
+function openStrategyDialog(strategy = null) {
+  const form = document.querySelector("#strategyForm");
+  form.reset();
+  state.editingStrategyId = strategy?.id ?? null;
+  document.querySelector("#strategyDialogTitle").textContent = strategy ? "전략 수정" : "새 전략 만들기";
+  document.querySelector("#strategySubmitButton").textContent = strategy ? "변경사항 저장" : "전략 저장";
+  resetDcaItems();
+  if (strategy) {
+    form.elements.name.value = strategy.name;
+    form.elements.strategy_type.value = strategy.strategy_type;
+    form.elements.platform.value = strategy.platform || "";
+    form.elements.symbol.value = strategy.symbol || "";
+    form.elements.budget.value = strategy.budget || 0;
+    form.elements.take_profit_pct.value = strategy.take_profit_pct ?? "";
+    form.elements.stop_loss_pct.value = strategy.stop_loss_pct ?? "";
+    form.elements.interval.value = strategy.params?.interval || "daily";
+    form.elements.execution_time.value = strategy.params?.execution_time || "23:30";
+    if (strategy.strategy_type === "dca") {
+      document.querySelector("#dcaItemRows").replaceChildren();
+      for (const item of dcaItems(strategy, strategy.platform)) {
+        addDcaItemRow(item.symbol, item.order_type === "quantity" ? item.quantity : (item.amount ?? item.amount_usd), item.market);
+      }
+    }
+  }
+  updateStrategyFields();
+  updateStrategyPreview();
+  document.querySelector("#strategyDialog").showModal();
+  form.elements.name.focus();
+}
+
+function closeStrategyDialog() {
+  document.querySelector("#strategyDialog").close();
+  state.editingStrategyId = null;
+}
+
+function updateStrategyPreview() {
+  const form = document.querySelector("#strategyForm");
+  const name = form.elements.name.value.trim() || "이 전략";
+  const platform = platformLabel(form.elements.platform.value || "플랫폼 미선택");
+  let description;
+  if (form.elements.strategy_type.value === "dca") {
+    const assets = [...form.querySelectorAll(".dca-item-row")]
+      .map((row) => {
+        const symbol = row.querySelector('[data-dca-input="symbol"]').value.trim();
+        const value = row.querySelector('[data-dca-input="value"]').value;
+        const spec = dcaOrderSpec(form.elements.platform.value, row.querySelector('[data-dca-input="market"]').value);
+        if (!symbol) return "";
+        return `${symbol} ${spec.orderType === "quantity" ? `${value}주` : spec.currency === "USD" ? `$${value}` : `${number.format(value)}원`}`;
+      })
+      .filter(Boolean)
+      .join(", ") || "선택한 자산";
+    description = `${platform}에서 ${intervalLabel(form.elements.interval.value)} ${form.elements.execution_time.value || "시간 미설정"}에 다음 자산을 매수합니다: ${assets}.`;
+  } else {
+    description = `${platform}에서 ${won.format(Number(form.elements.budget.value || 0))} 예산으로 ${form.elements.strategy_type.value} 전략을 운용합니다.`;
+  }
+  document.querySelector("#strategyPreview").innerHTML = `<span>저장 전 확인</span><strong>${escapeHtml(name)}</strong><p>${escapeHtml(description)}</p>`;
+}
+
+document.querySelector("#newStrategyButton").addEventListener("click", () => openStrategyDialog());
+document.querySelector("#strategyDialogClose").addEventListener("click", closeStrategyDialog);
+document.querySelector("#strategyCancelButton").addEventListener("click", closeStrategyDialog);
+document.querySelector("#strategyDialog").addEventListener("click", (event) => {
+  if (event.target === event.currentTarget) closeStrategyDialog();
+});
+document.querySelector("#strategyForm").addEventListener("input", updateStrategyPreview);
+document.querySelector("#strategyForm").addEventListener("change", updateStrategyPreview);
 document.querySelector('#strategyForm select[name="strategy_type"]').addEventListener("change", updateStrategyFields);
 document.querySelector('#strategyForm select[name="platform"]').addEventListener("change", updateDcaOrderFields);
-document.querySelector("#addDcaItemButton").addEventListener("click", () => addDcaItemRow());
+document.querySelector("#addDcaItemButton").addEventListener("click", () => {
+  addDcaItemRow();
+  updateStrategyPreview();
+});
 document.querySelector("#dcaItemRows").addEventListener("click", (event) => {
   const button = event.target.closest("[data-remove-dca-item]");
   if (!button) return;
   if (document.querySelectorAll(".dca-item-row").length === 1) return;
   button.closest(".dca-item-row").remove();
+  updateStrategyPreview();
 });
 document.querySelector("#dcaItemRows").addEventListener("change", (event) => {
   if (event.target.matches('[data-dca-input="market"]')) updateDcaOrderFields();
@@ -751,9 +892,14 @@ document.querySelector("#dcaItemRows").addEventListener("change", (event) => {
 
 resetDcaItems();
 
-document.querySelector("#strategiesTable").addEventListener("click", async (event) => {
+document.querySelector("#strategiesList").addEventListener("click", async (event) => {
   const button = event.target.closest("[data-strategy]");
   if (!button) return;
+  if (button.dataset.action === "edit") {
+    const strategy = state.strategies.find((item) => String(item.id) === button.dataset.strategy);
+    if (strategy) openStrategyDialog(strategy);
+    return;
+  }
   if (button.dataset.action === "delete") {
     if (!window.confirm(`"${button.dataset.name}" 전략을 삭제할까요?`)) return;
     await api(`/api/strategies/${button.dataset.strategy}`, { method: "DELETE" });

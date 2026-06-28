@@ -35,6 +35,10 @@ class TossInvestClient:
     def buying_power(self, currency: str) -> dict[str, Any]:
         return self._request("GET", f"/api/v1/buying-power?currency={currency}", headers={"x-tossinvest-account": self.account_seq})
 
+    def exchange_rate(self, base_currency: str = "USD", quote_currency: str = "KRW") -> dict[str, Any]:
+        query = urlencode({"baseCurrency": base_currency, "quoteCurrency": quote_currency})
+        return self._request("GET", f"/api/v1/exchange-rate?{query}")
+
     def _token(self) -> str:
         basic = base64.b64encode(f"{self.client_id}:{self.client_secret}".encode("utf-8")).decode("ascii")
         payload = urlencode({"grant_type": "client_credentials"}).encode("utf-8")
