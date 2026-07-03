@@ -102,7 +102,10 @@
           <span id="assetCount" class="pill">0개</span>
         </div>
         <div class="filters">
-          <label>플랫폼<select id="assetPlatformFilter"></select></label>
+          <fieldset class="platform-filter">
+            <legend>플랫폼</legend>
+            <div id="assetPlatformFilter" class="platform-filter-buttons"></div>
+          </fieldset>
           <label>검색<input id="assetSearchInput" type="search" placeholder="종목명 또는 코드" /></label>
           <label>정렬<select id="assetSortSelect">
             <option value="value_desc">평가금액 높은 순</option>

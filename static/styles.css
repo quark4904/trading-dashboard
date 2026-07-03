@@ -355,9 +355,45 @@ button.danger-button {
 
 .filters {
   display: grid;
-  grid-template-columns: minmax(180px, 0.8fr) minmax(220px, 1.2fr) minmax(200px, 1fr);
+  grid-template-columns: minmax(260px, auto) minmax(220px, 1.2fr) minmax(200px, 1fr);
   gap: 12px;
   margin: 10px 0 12px;
+}
+
+.platform-filter {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.platform-filter legend {
+  margin-bottom: 6px;
+}
+
+.platform-filter-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+button.platform-filter-button {
+  padding: 9px 12px;
+  border: 1px solid var(--line);
+  background: #f7f9fb;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+button.platform-filter-button:hover {
+  border-color: #aab6c3;
+  color: var(--ink);
+}
+
+button.platform-filter-button.active {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: white;
 }
 
 .collapsible-header {

@@ -96,9 +96,25 @@ function renderPlatforms() {
   document.querySelector('#strategyForm select[name="platform"]').innerHTML = `<option value="">전체</option>${options}`;
   updateStrategyFields();
   const assetFilter = document.querySelector("#assetPlatformFilter");
-  const currentValue = assetFilter.value || "all";
-  assetFilter.innerHTML = `<option value="all">전체 플랫폼</option>${options}`;
-  assetFilter.value = state.platforms.some((p) => p.code === currentValue) ? currentValue : "all";
+  const currentValue = state.platforms.some((p) => p.code === state.assetFilters.platform)
+    ? state.assetFilters.platform
+    : "all";
+  state.assetFilters.platform = currentValue;
+  assetFilter.innerHTML = [
+    { code: "all", name: "전체" },
+    ...state.platforms,
+  ]
+    .map(
+      (platform) => `
+        <button
+          type="button"
+          class="platform-filter-button${platform.code === currentValue ? " active" : ""}"
+          data-platform="${escapeHtml(platform.code)}"
+          aria-pressed="${platform.code === currentValue}"
+        >${escapeHtml(platform.name)}</button>
+      `,
+    )
+    .join("");
 }
 
 function renderPortfolio(summary) {
@@ -505,8 +521,16 @@ function resetDcaItems() {
 
 document.querySelector("#refreshButton").addEventListener("click", refresh);
 
-document.querySelector("#assetPlatformFilter").addEventListener("change", (event) => {
-  state.assetFilters.platform = event.target.value;
+document.querySelector("#assetPlatformFilter").addEventListener("click", (event) => {
+  const button = event.target.closest("[data-platform]");
+  if (!button) return;
+
+  state.assetFilters.platform = button.dataset.platform;
+  document.querySelectorAll("#assetPlatformFilter [data-platform]").forEach((item) => {
+    const isActive = item === button;
+    item.classList.toggle("active", isActive);
+    item.setAttribute("aria-pressed", String(isActive));
+  });
   renderAssetTable();
 });
 
