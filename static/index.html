@@ -23,7 +23,10 @@
     <main>
       <section id="portfolio" class="section">
         <div class="section-title">
-          <h2>손익 현황</h2>
+          <div class="section-heading">
+            <h2>손익 현황</h2>
+            <div id="syncMessage" class="message"></div>
+          </div>
           <div class="actions">
             <button id="syncAllButton" type="button">전체 동기화</button>
             <button id="syncStatusButton" class="sync-status-badge unknown" type="button">
@@ -33,7 +36,6 @@
             <button id="refreshButton" type="button">로컬 데이터 새로고침</button>
           </div>
         </div>
-        <div id="syncMessage" class="message"></div>
         <div id="summaryCards" class="metrics"></div>
         <h3>주문 가능 현금</h3>
         <div id="cashCards" class="cash-grid"></div>
