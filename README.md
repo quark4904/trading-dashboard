@@ -35,7 +35,8 @@ Compose 설정 파일은 `compose.yaml`입니다.
 docker compose up -d --build
 ```
 
-브라우저에서 `http://서버IP:8765`로 접속합니다.
+기본 Compose 설정은 포트를 서버의 로컬 인터페이스에만 열어 둡니다.
+Cloudflare Tunnel의 서비스 URL은 `http://localhost:8765`로 설정하세요.
 
 운영 시 데이터와 설정은 컨테이너 밖에 둡니다.
 

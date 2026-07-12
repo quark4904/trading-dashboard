@@ -33,7 +33,7 @@ services:
       TOSSINVEST_ACCOUNT_LABEL: ${TOSSINVEST_ACCOUNT_LABEL:-토스증권}
       TOSSINVEST_ACCOUNT_CATEGORY: ${TOSSINVEST_ACCOUNT_CATEGORY:-주식(해외/국내)}
     ports:
-      - "8765:8765"
+      - "127.0.0.1:8765:8765"
     volumes:
       - ./data:/data
     healthcheck:
