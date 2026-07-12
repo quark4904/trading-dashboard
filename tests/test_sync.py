@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import tempfile
 import unittest
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -11,6 +11,7 @@ from unittest.mock import MagicMock, patch
 from app.config import api_key_expirations
 from app.integrations.fx import FxError, usd_krw_rate
 from app.repository import Repository
+from app.scheduler import KST, scheduled_slot
 from app.services import TradingService
 from app.strategy_capabilities import compile_dca_buy_request, strategy_capabilities
 from app.validation import validate_strategy
@@ -339,6 +340,102 @@ class StrategyCapabilityTests(unittest.TestCase):
                     "params": {"execution_time": "25:00"},
                 }
             )
+
+    def test_dca_validates_weekly_and_monthly_execution_days(self) -> None:
+        weekly = validate_strategy(
+            {
+                "name": "주간 DCA",
+                "strategy_type": "dca",
+                "platform": "upbit",
+                "params": {"items": [{"symbol": "KRW-BTC", "value": 5000}], "interval": "weekly", "execution_day": "friday"},
+            }
+        )
+        monthly = validate_strategy(
+            {
+                "name": "월간 DCA",
+                "strategy_type": "dca",
+                "platform": "upbit",
+                "params": {"items": [{"symbol": "KRW-BTC", "value": 5000}], "interval": "monthly", "execution_day": 15},
+            }
+        )
+
+        self.assertEqual(weekly["params"]["execution_day"], "friday")
+        self.assertEqual(monthly["params"]["execution_day"], 15)
+        with self.assertRaisesRegex(ValueError, "1일부터 28일까지"):
+            validate_strategy(
+                {
+                    "name": "잘못된 월간 DCA",
+                    "strategy_type": "dca",
+                    "platform": "upbit",
+                    "params": {"items": [{"symbol": "KRW-BTC", "value": 5000}], "interval": "monthly", "execution_day": 31},
+                }
+            )
+
+
+class StrategyRunTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.repo = Repository(Path(self.temp_dir.name) / "dashboard.db")
+        self.service = TradingService(self.repo)
+        self.strategy = self.repo.create_strategy(
+            validate_strategy(
+                {
+                    "name": "BTC 매일 매수",
+                    "strategy_type": "dca",
+                    "platform": "upbit",
+                    "params": {
+                        "items": [{"symbol": "KRW-BTC", "value": 5000}],
+                        "interval": "daily",
+                        "execution_time": "09:30",
+                    },
+                }
+            )
+        )
+        self.repo.set_strategy_enabled(self.strategy["id"], True)
+
+    def tearDown(self) -> None:
+        self.temp_dir.cleanup()
+
+    def test_manual_dry_run_records_run_and_order(self) -> None:
+        run = self.service.run_dca_strategy_now(self.strategy["id"])
+
+        self.assertEqual(run["status"], "success")
+        self.assertEqual(run["order_count"], 1)
+        history = self.repo.strategy_runs()
+        self.assertEqual(history[0]["trigger"], "manual")
+        self.assertEqual(history[0]["orders"][0]["status"], "dry_run")
+        self.assertEqual(history[0]["orders"][0]["amount"], 5000)
+
+    def test_due_run_executes_once_per_scheduled_minute(self) -> None:
+        now = datetime(2026, 7, 12, 9, 30, tzinfo=KST)
+
+        first = self.service.run_due_dca_strategies(now)
+        second = self.service.run_due_dca_strategies(now)
+
+        self.assertEqual(len(first["runs"]), 1)
+        self.assertEqual(second["runs"], [])
+        self.assertEqual(len(self.repo.strategy_runs()), 1)
+        self.assertEqual(len(self.repo.orders()), 1)
+
+    def test_weekly_and_monthly_schedule_slots(self) -> None:
+        strategy = self.repo.strategy(self.strategy["id"])
+        strategy["params"].update({"interval": "weekly", "execution_day": "sunday"})
+        sunday = datetime(2026, 7, 12, 9, 30, tzinfo=KST)
+        monday = datetime(2026, 7, 13, 9, 30, tzinfo=KST)
+
+        self.assertIsNotNone(scheduled_slot(strategy, sunday))
+        self.assertIsNone(scheduled_slot(strategy, monday))
+        strategy["params"].update({"interval": "monthly", "execution_day": 12})
+        self.assertIsNotNone(scheduled_slot(strategy, sunday))
+
+    def test_run_history_survives_strategy_deletion(self) -> None:
+        self.service.run_dca_strategy_now(self.strategy["id"])
+        self.repo.delete_strategy(self.strategy["id"])
+
+        history = self.repo.strategy_runs()
+
+        self.assertEqual(history[0]["strategy_name"], "삭제된 전략")
+        self.assertEqual(len(history[0]["orders"]), 1)
 
 
 class ExchangeRateTests(unittest.TestCase):

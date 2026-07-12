@@ -72,12 +72,26 @@ def validate_strategy(data: dict) -> dict:
         match = re.fullmatch(r"(\d{2}):(\d{2})", execution_time)
         if not match or int(match.group(1)) > 23 or int(match.group(2)) > 59:
             raise ValueError("실행 시간은 HH:MM 형식이어야 합니다.")
+        execution_day = params.get("execution_day")
+        if interval == "weekly":
+            execution_day = str(execution_day or "monday").lower()
+            if execution_day not in {"monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"}:
+                raise ValueError("주간 DCA 실행 요일을 확인하세요.")
+        elif interval == "monthly":
+            try:
+                execution_day = int(execution_day or 1)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("월간 DCA 실행일을 확인하세요.") from exc
+            if not 1 <= execution_day <= 28:
+                raise ValueError("월간 DCA 실행일은 1일부터 28일까지 선택할 수 있습니다.")
         symbol = ",".join(symbols)
         params = {
             "items": items,
             "interval": interval,
             "execution_time": execution_time,
         }
+        if interval in {"weekly", "monthly"}:
+            params["execution_day"] = execution_day
 
     result = {
         "name": name,

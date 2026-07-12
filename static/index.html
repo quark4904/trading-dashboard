@@ -85,6 +85,7 @@
             <div id="dcaItemRows" class="dca-item-rows"></div>
           </div>
           <label data-dca-field>실행 주기<select name="interval"><option value="daily">매일</option><option value="weekly">매주</option><option value="monthly">매월</option></select></label>
+          <label id="executionDayField" class="hidden" data-dca-field><span id="executionDayLabel">실행 요일</span><select name="execution_day"></select></label>
           <label data-dca-field>실행 시간 (KST)<input name="execution_time" type="time" value="23:30" required /></label>
           <label data-standard-field>예산 (KRW)<input name="budget" type="number" step="1" min="0" value="0" /></label>
           <label data-standard-field>익절 %<input name="take_profit_pct" type="number" step="0.1" /></label>
@@ -129,8 +130,11 @@
       <section id="activity" class="section">
         <div class="section-title">
           <h2>전략 실행 로그</h2>
-          <span class="pill">자동매매 이력</span>
+          <span class="pill">DRY_RUN 이력</span>
         </div>
+        <h3>전략 실행</h3>
+        <div id="strategyRunsTable" class="table"></div>
+        <h3>생성된 주문</h3>
         <div id="ordersTable" class="table"></div>
       </section>
     </main>

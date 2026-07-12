@@ -49,6 +49,7 @@ class Repository:
 
                 CREATE TABLE IF NOT EXISTS orders (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    strategy_run_id INTEGER,
                     created_at TEXT NOT NULL,
                     platform TEXT NOT NULL,
                     symbol TEXT NOT NULL,
@@ -56,6 +57,7 @@ class Repository:
                     order_type TEXT NOT NULL,
                     quantity REAL,
                     amount REAL,
+                    currency TEXT NOT NULL DEFAULT 'KRW',
                     limit_price REAL,
                     dry_run INTEGER NOT NULL,
                     status TEXT NOT NULL,
@@ -88,6 +90,18 @@ class Repository:
                     error TEXT
                 );
 
+                CREATE TABLE IF NOT EXISTS strategy_runs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    strategy_id INTEGER NOT NULL,
+                    trigger TEXT NOT NULL,
+                    schedule_key TEXT UNIQUE,
+                    started_at TEXT NOT NULL,
+                    completed_at TEXT,
+                    status TEXT NOT NULL,
+                    order_count INTEGER NOT NULL DEFAULT 0,
+                    error TEXT
+                );
+
                 CREATE TABLE IF NOT EXISTS asset_aliases (
                     platform TEXT NOT NULL,
                     symbol TEXT NOT NULL,
@@ -113,6 +127,11 @@ class Repository:
             }
             if "details_json" not in exchange_rate_columns:
                 conn.execute("ALTER TABLE exchange_rates ADD COLUMN details_json TEXT NOT NULL DEFAULT '{}'")
+            order_columns = {row["name"] for row in conn.execute("PRAGMA table_info(orders)").fetchall()}
+            if "strategy_run_id" not in order_columns:
+                conn.execute("ALTER TABLE orders ADD COLUMN strategy_run_id INTEGER")
+            if "currency" not in order_columns:
+                conn.execute("ALTER TABLE orders ADD COLUMN currency TEXT NOT NULL DEFAULT 'KRW'")
             count = conn.execute("SELECT COUNT(*) FROM holdings").fetchone()[0]
             if count == 0 and env_flag("TRADING_DASHBOARD_SEED_DEMO"):
                 self._seed(conn)
@@ -355,16 +374,24 @@ class Repository:
         with self.connect() as conn:
             return [dict(row) for row in conn.execute("SELECT * FROM orders ORDER BY id DESC LIMIT 100")]
 
-    def create_order(self, request: dict[str, Any], status: str, reason: str) -> dict[str, Any]:
+    def create_order(
+        self,
+        request: dict[str, Any],
+        status: str,
+        reason: str,
+        *,
+        strategy_run_id: int | None = None,
+    ) -> dict[str, Any]:
         now = utc_now()
         with self.connect() as conn:
             cursor = conn.execute(
                 """
                 INSERT INTO orders
-                (created_at, platform, symbol, side, order_type, quantity, amount, limit_price, dry_run, status, reason, request_json)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (strategy_run_id, created_at, platform, symbol, side, order_type, quantity, amount, currency, limit_price, dry_run, status, reason, request_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
+                    strategy_run_id,
                     now,
                     request.get("platform"),
                     request.get("symbol"),
@@ -372,6 +399,7 @@ class Repository:
                     request.get("order_type", "market"),
                     request.get("quantity"),
                     request.get("amount"),
+                    request.get("currency", "KRW"),
                     request.get("limit_price"),
                     1 if request.get("dry_run", True) else 0,
                     status,
@@ -383,16 +411,89 @@ class Repository:
             row = conn.execute("SELECT * FROM orders WHERE id = ?", (order_id,)).fetchone()
             return dict(row)
 
+    def strategy(self, strategy_id: int) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM strategies WHERE id = ?", (strategy_id,)).fetchone()
+            return self._strategy_row(row) if row else None
+
+    def start_strategy_run(self, strategy_id: int, trigger: str, schedule_key: str | None = None) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            try:
+                cursor = conn.execute(
+                    """
+                    INSERT INTO strategy_runs (strategy_id, trigger, schedule_key, started_at, status)
+                    VALUES (?, ?, ?, ?, 'running')
+                    """,
+                    (strategy_id, trigger, schedule_key, utc_now()),
+                )
+            except sqlite3.IntegrityError:
+                return None
+            row = conn.execute("SELECT * FROM strategy_runs WHERE id = ?", (cursor.lastrowid,)).fetchone()
+            return dict(row)
+
+    def finish_strategy_run(
+        self,
+        run_id: int,
+        *,
+        status: str,
+        order_count: int = 0,
+        error: str | None = None,
+    ) -> dict[str, Any]:
+        with self.connect() as conn:
+            conn.execute(
+                """
+                UPDATE strategy_runs
+                SET completed_at = ?, status = ?, order_count = ?, error = ?
+                WHERE id = ?
+                """,
+                (utc_now(), status, order_count, error, run_id),
+            )
+            row = conn.execute("SELECT * FROM strategy_runs WHERE id = ?", (run_id,)).fetchone()
+            if not row:
+                raise RuntimeError(f"strategy run {run_id} not found")
+            return dict(row)
+
+    def strategy_runs(self, limit: int = 50) -> list[dict[str, Any]]:
+        safe_limit = max(1, min(int(limit), 200))
+        with self.connect() as conn:
+            run_rows = conn.execute(
+                """
+                SELECT strategy_runs.*, COALESCE(strategies.name, '삭제된 전략') AS strategy_name
+                FROM strategy_runs
+                LEFT JOIN strategies ON strategies.id = strategy_runs.strategy_id
+                ORDER BY strategy_runs.id DESC
+                LIMIT ?
+                """,
+                (safe_limit,),
+            ).fetchall()
+            result = [dict(row) for row in run_rows]
+            if not result:
+                return result
+            run_ids = [item["id"] for item in result]
+            placeholders = ",".join("?" for _ in run_ids)
+            order_rows = conn.execute(
+                f"SELECT * FROM orders WHERE strategy_run_id IN ({placeholders}) ORDER BY id",
+                run_ids,
+            ).fetchall()
+            orders_by_run: dict[int, list[dict[str, Any]]] = {}
+            for row in order_rows:
+                order = dict(row)
+                orders_by_run.setdefault(order["strategy_run_id"], []).append(order)
+            for run in result:
+                run["orders"] = orders_by_run.get(run["id"], [])
+            return result
+
     def strategies(self) -> list[dict[str, Any]]:
         with self.connect() as conn:
             rows = conn.execute("SELECT * FROM strategies ORDER BY id DESC").fetchall()
-            result = []
-            for row in rows:
-                item = dict(row)
-                item["enabled"] = bool(item["enabled"])
-                item["params"] = json.loads(item.pop("params_json") or "{}")
-                result.append(item)
-            return result
+            return [self._strategy_row(row) for row in rows]
+
+    @staticmethod
+    def _strategy_row(row: sqlite3.Row) -> dict[str, Any]:
+        item = dict(row)
+        item["enabled"] = bool(item["enabled"])
+        item["params"] = json.loads(item.pop("params_json") or "{}")
+        return item
 
     def create_strategy(self, request: dict[str, Any]) -> dict[str, Any]:
         now = utc_now()
@@ -447,10 +548,7 @@ class Repository:
                 ),
             )
             row = conn.execute("SELECT * FROM strategies WHERE id = ?", (strategy_id,)).fetchone()
-            item = dict(row)
-            item["enabled"] = bool(item["enabled"])
-            item["params"] = json.loads(item.pop("params_json") or "{}")
-            return item
+            return self._strategy_row(row)
 
     def set_strategy_enabled(self, strategy_id: int, enabled: bool) -> dict[str, Any] | None:
         with self.connect() as conn:
@@ -461,10 +559,7 @@ class Repository:
             row = conn.execute("SELECT * FROM strategies WHERE id = ?", (strategy_id,)).fetchone()
             if not row:
                 return None
-            item = dict(row)
-            item["enabled"] = bool(item["enabled"])
-            item["params"] = json.loads(item.pop("params_json") or "{}")
-            return item
+            return self._strategy_row(row)
 
     def delete_strategy(self, strategy_id: int) -> bool:
         with self.connect() as conn:

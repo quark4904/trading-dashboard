@@ -326,13 +326,37 @@ async function renderOrders() {
           <td>${escapeHtml(item.symbol)}</td>
           <td>${item.side === "buy" ? "매수" : "매도"}</td>
           <td>${item.quantity ?? "-"}</td>
-          <td>${item.amount ? won.format(item.amount) : "-"}</td>
+          <td>${formatOrderAmount(item)}</td>
           <td>${escapeHtml(item.status)}</td>
           <td>${escapeHtml(item.reason)}</td>
         </tr>
       `,
         )
       : [`<tr><td colspan="8">아직 전략 실행 기록이 없습니다.</td></tr>`],
+  );
+}
+
+function formatOrderAmount(item) {
+  if (item.amount == null) return "-";
+  return item.currency === "USD" ? `$${number.format(item.amount)}` : won.format(item.amount);
+}
+
+async function renderStrategyRuns() {
+  const runs = await api("/api/strategy-runs");
+  document.querySelector("#strategyRunsTable").innerHTML = table(
+    ["시작", "전략", "실행 방식", "상태", "주문", "오류"],
+    runs.length
+      ? runs.map((run) => `
+        <tr>
+          <td>${new Date(run.started_at).toLocaleString("ko-KR")}</td>
+          <td>${escapeHtml(run.strategy_name)}</td>
+          <td>${run.trigger === "scheduled" ? "일정" : "수동 테스트"}</td>
+          <td>${escapeHtml(run.status)}</td>
+          <td>${run.order_count}건</td>
+          <td>${escapeHtml(run.error || "-")}</td>
+        </tr>
+      `)
+      : [`<tr><td colspan="6">아직 DCA 실행 이력이 없습니다.</td></tr>`],
   );
 }
 
@@ -355,7 +379,7 @@ function strategyCard(item) {
     ? dcaItems(item, item.platform).map((entry) => `${entry.symbol} ${dcaItemValueLabel(entry)}`).join(" · ")
     : item.symbol || "전체 자산";
   const schedule = item.strategy_type === "dca"
-    ? `${intervalLabel(item.params?.interval)} ${item.params?.execution_time || "23:30"} KST`
+    ? scheduleLabel(item.params)
     : `${won.format(item.budget || 0)} 예산`;
   return `
     <article class="strategy-card">
@@ -373,6 +397,7 @@ function strategyCard(item) {
       </div>
       <div class="strategy-card-actions">
         <button class="secondary" data-strategy="${escapeHtml(item.id)}" data-action="toggle" data-enabled="${!item.enabled}">${item.enabled ? "중지" : "활성"}</button>
+        ${item.strategy_type === "dca" ? `<button class="table-action" data-strategy="${escapeHtml(item.id)}" data-action="dry-run">DRY_RUN 테스트</button>` : ""}
         <button class="table-action" data-strategy="${escapeHtml(item.id)}" data-action="edit">수정</button>
         <button class="danger-button" data-strategy="${escapeHtml(item.id)}" data-action="delete" data-name="${escapeHtml(item.name)}">삭제</button>
       </div>
@@ -418,6 +443,19 @@ function intervalLabel(interval) {
   return { daily: "매일", weekly: "매주", monthly: "매월" }[interval] ?? interval;
 }
 
+function scheduleLabel(params = {}) {
+  const suffix = params.interval === "weekly"
+    ? ` ${weekdayLabel(params.execution_day || "monday")}`
+    : params.interval === "monthly"
+      ? ` ${params.execution_day || 1}일`
+      : "";
+  return `${intervalLabel(params.interval)}${suffix} ${params.execution_time || "23:30"} KST`;
+}
+
+function weekdayLabel(value) {
+  return { monday: "월요일", tuesday: "화요일", wednesday: "수요일", thursday: "목요일", friday: "금요일", saturday: "토요일", sunday: "일요일" }[value] ?? value;
+}
+
 async function refresh() {
   const [platforms, summary, syncStatus, strategyCapabilities] = await Promise.all([
     api("/api/platforms"),
@@ -432,7 +470,7 @@ async function refresh() {
   renderSyncStatus(syncStatus);
   renderPlatforms();
   renderPortfolio(summary);
-  await Promise.all([renderOrders(), renderStrategies()]);
+  await Promise.all([renderOrders(), renderStrategyRuns(), renderStrategies()]);
 }
 
 function formObject(form) {
@@ -456,8 +494,10 @@ function formObject(form) {
       interval: data.interval,
       execution_time: data.execution_time,
     };
+    if (data.execution_day) data.params.execution_day = data.execution_day;
   }
   delete data.interval;
+  delete data.execution_day;
   delete data.execution_time;
   data.enabled = false;
   return data;
@@ -468,7 +508,26 @@ function updateStrategyFields() {
   const isDca = form.elements.strategy_type.value === "dca";
   form.querySelectorAll("[data-dca-field]").forEach((element) => element.classList.toggle("hidden", !isDca));
   form.querySelectorAll("[data-standard-field]").forEach((element) => element.classList.toggle("hidden", isDca));
+  updateExecutionDayField();
   updateDcaOrderFields();
+}
+
+function updateExecutionDayField() {
+  const form = document.querySelector("#strategyForm");
+  const field = document.querySelector("#executionDayField");
+  const select = form.elements.execution_day;
+  const interval = form.elements.interval.value;
+  const isDca = form.elements.strategy_type.value === "dca";
+  field.classList.toggle("hidden", !isDca || interval === "daily");
+  if (interval === "weekly") {
+    document.querySelector("#executionDayLabel").textContent = "실행 요일";
+    select.innerHTML = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+      .map((day) => `<option value="${day}">${weekdayLabel(day)}</option>`)
+      .join("");
+  } else if (interval === "monthly") {
+    document.querySelector("#executionDayLabel").textContent = "실행일";
+    select.innerHTML = Array.from({ length: 28 }, (_, index) => `<option value="${index + 1}">${index + 1}일</option>`).join("");
+  }
 }
 
 function updateDcaOrderFields() {
@@ -847,6 +906,8 @@ function openStrategyDialog(strategy = null) {
     form.elements.take_profit_pct.value = strategy.take_profit_pct ?? "";
     form.elements.stop_loss_pct.value = strategy.stop_loss_pct ?? "";
     form.elements.interval.value = strategy.params?.interval || "daily";
+    updateExecutionDayField();
+    if (strategy.params?.execution_day) form.elements.execution_day.value = strategy.params.execution_day;
     form.elements.execution_time.value = strategy.params?.execution_time || "23:30";
     if (strategy.strategy_type === "dca") {
       document.querySelector("#dcaItemRows").replaceChildren();
@@ -882,7 +943,7 @@ function updateStrategyPreview() {
       })
       .filter(Boolean)
       .join(", ") || "선택한 자산";
-    description = `${platform}에서 ${intervalLabel(form.elements.interval.value)} ${form.elements.execution_time.value || "시간 미설정"}에 다음 자산을 매수합니다: ${assets}.`;
+    description = `${platform}에서 ${scheduleLabel({ interval: form.elements.interval.value, execution_time: form.elements.execution_time.value, execution_day: form.elements.execution_day.value })}에 다음 자산을 매수합니다: ${assets}.`;
   } else {
     description = `${platform}에서 ${won.format(Number(form.elements.budget.value || 0))} 예산으로 ${form.elements.strategy_type.value} 전략을 운용합니다.`;
   }
@@ -899,6 +960,10 @@ document.querySelector("#strategyForm").addEventListener("input", updateStrategy
 document.querySelector("#strategyForm").addEventListener("change", updateStrategyPreview);
 document.querySelector('#strategyForm select[name="strategy_type"]').addEventListener("change", updateStrategyFields);
 document.querySelector('#strategyForm select[name="platform"]').addEventListener("change", updateDcaOrderFields);
+document.querySelector('#strategyForm select[name="interval"]').addEventListener("change", () => {
+  updateExecutionDayField();
+  updateStrategyPreview();
+});
 document.querySelector("#addDcaItemButton").addEventListener("click", () => {
   addDcaItemRow();
   updateStrategyPreview();
@@ -928,6 +993,11 @@ document.querySelector("#strategiesList").addEventListener("click", async (event
     if (!window.confirm(`"${button.dataset.name}" 전략을 삭제할까요?`)) return;
     await api(`/api/strategies/${button.dataset.strategy}`, { method: "DELETE" });
     await renderStrategies();
+    return;
+  }
+  if (button.dataset.action === "dry-run") {
+    await api(`/api/strategies/${button.dataset.strategy}/dry-run`, { method: "POST" });
+    await Promise.all([renderOrders(), renderStrategyRuns()]);
     return;
   }
   await api(`/api/strategies/${button.dataset.strategy}/enabled?value=${button.dataset.enabled}`, { method: "PATCH" });

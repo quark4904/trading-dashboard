@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from datetime import datetime
 from typing import Any, Callable
 
 from app.config import platform_configs
@@ -9,6 +10,8 @@ from app.integrations.kis import KISClient, kis_accounts
 from app.integrations.tossinvest import TossInvestClient
 from app.integrations.upbit import UpbitClient
 from app.repository import Repository
+from app.scheduler import KST, scheduled_slot
+from app.strategy_capabilities import compile_dca_buy_request
 
 
 DUST_VALUE_THRESHOLD = 100
@@ -313,6 +316,63 @@ class TradingService:
         else:
             status = "partial"
         return {"ok": status == "success", "status": status, "results": results}
+
+    def run_due_dca_strategies(self, now: datetime | None = None) -> dict[str, Any]:
+        now = now or datetime.now(KST)
+        runs = []
+        for strategy in self.repo.strategies():
+            schedule_key = scheduled_slot(strategy, now)
+            if schedule_key:
+                result = self._run_dca_strategy(strategy, trigger="scheduled", schedule_key=schedule_key)
+                if result:
+                    runs.append(result)
+        return {"checked_at": now.astimezone(KST).isoformat(), "runs": runs}
+
+    def run_dca_strategy_now(self, strategy_id: int) -> dict[str, Any]:
+        strategy = self.repo.strategy(strategy_id)
+        if not strategy:
+            raise ValueError("전략을 찾을 수 없습니다.")
+        if strategy["strategy_type"] != "dca":
+            raise ValueError("DCA 전략만 DRY_RUN 테스트를 실행할 수 있습니다.")
+        return self._run_dca_strategy(strategy, trigger="manual", schedule_key=None)
+
+    def _run_dca_strategy(
+        self,
+        strategy: dict[str, Any],
+        *,
+        trigger: str,
+        schedule_key: str | None,
+    ) -> dict[str, Any] | None:
+        run = self.repo.start_strategy_run(strategy["id"], trigger, schedule_key)
+        if not run:
+            return None
+
+        try:
+            items = strategy.get("params", {}).get("items") or []
+            if not items:
+                raise ValueError("DCA 주문 항목이 없습니다.")
+            for item in items:
+                compiled = compile_dca_buy_request(strategy["platform"], item)
+                request = {
+                    "platform": strategy["platform"],
+                    "symbol": item["symbol"],
+                    "side": "buy",
+                    "order_type": "market",
+                    "quantity": item.get("quantity"),
+                    "amount": item.get("amount"),
+                    "currency": item.get("currency", "KRW"),
+                    "dry_run": True,
+                    "compiled_request": compiled,
+                }
+                self.repo.create_order(
+                    request,
+                    status="dry_run",
+                    reason="DRY_RUN: 실제 주문을 전송하지 않았습니다.",
+                    strategy_run_id=run["id"],
+                )
+            return self.repo.finish_strategy_run(run["id"], status="success", order_count=len(items))
+        except Exception as exc:
+            return self.repo.finish_strategy_run(run["id"], status="failed", error=str(exc))
 
     def _run_sync(self, platform: str, sync: Callable[[], dict[str, Any]]) -> dict[str, Any]:
         sync_id = self.repo.start_sync(platform)

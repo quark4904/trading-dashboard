@@ -8,6 +8,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 from app.config import ROOT_DIR, api_key_expirations, platform_configs
 from app.repository import Repository
+from app.scheduler import StrategyScheduler
 from app.services import TradingService
 from app.strategy_capabilities import strategy_capabilities
 from app.validation import validate_strategy
@@ -51,6 +52,8 @@ class Handler(BaseHTTPRequestHandler):
             )
         if parsed.path == "/api/orders":
             return self.json_response(repo.orders())
+        if parsed.path == "/api/strategy-runs":
+            return self.json_response(repo.strategy_runs())
         if parsed.path == "/api/strategies":
             return self.json_response(repo.strategies())
         if parsed.path == "/api/strategy-capabilities":
@@ -67,6 +70,16 @@ class Handler(BaseHTTPRequestHandler):
             return self.json_response({"error": str(exc)}, status=400)
         if parsed.path == "/api/orders":
             return self.json_response({"error": "수동 주문은 지원하지 않습니다. 전략 실행 엔진에서만 주문 기록을 생성합니다."}, status=405)
+        if parsed.path == "/api/strategy-runs/execute-due":
+            return self.json_response(service.run_due_dca_strategies())
+        if parsed.path.startswith("/api/strategies/") and parsed.path.endswith("/dry-run"):
+            parts = parsed.path.strip("/").split("/")
+            try:
+                strategy_id = int(parts[2])
+                result = service.run_dca_strategy_now(strategy_id)
+            except (IndexError, ValueError) as exc:
+                return self.json_response({"error": str(exc)}, status=400)
+            return self.json_response(result, status=201)
         if parsed.path == "/api/sync/upbit":
             result = service.sync_upbit_holdings()
             return self.json_response(result, status=sync_http_status(result))
@@ -208,8 +221,13 @@ class Handler(BaseHTTPRequestHandler):
 
 def run(host: str = "127.0.0.1", port: int = 8765) -> None:
     server = ThreadingHTTPServer((host, port), Handler)
+    scheduler = StrategyScheduler(service)
+    scheduler.start()
     print(f"Trading dashboard MVP running at http://{host}:{port}")
-    server.serve_forever()
+    try:
+        server.serve_forever()
+    finally:
+        scheduler.stop()
 
 
 def sync_http_status(result: dict) -> int:
