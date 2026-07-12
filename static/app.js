@@ -67,10 +67,18 @@ function renderMetrics(total, exchangeRate) {
 }
 
 function table(headers, rows) {
+  const labeledRows = rows.map((row) => {
+    let cellIndex = 0;
+    return row.replace(/<td(\s[^>]*)?>/g, (tag, attributes = "") => {
+      const label = headers[cellIndex++] ?? "";
+      return `<td${attributes} data-label="${escapeHtml(label)}">`;
+    });
+  });
+
   return `
     <table>
       <thead><tr>${headers.map((header) => `<th>${escapeHtml(header)}</th>`).join("")}</tr></thead>
-      <tbody>${rows.join("")}</tbody>
+      <tbody>${labeledRows.join("")}</tbody>
     </table>
   `;
 }

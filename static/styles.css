@@ -16,11 +16,18 @@
   box-sizing: border-box;
 }
 
+html {
+  overflow-x: clip;
+}
+
 body {
   margin: 0;
+  width: 100%;
+  min-width: 0;
   min-height: 100vh;
   display: grid;
-  grid-template-columns: 240px 1fr;
+  grid-template-columns: 240px minmax(0, 1fr);
+  overflow-x: clip;
   background: var(--bg);
   color: var(--ink);
   font-family: "IBM Plex Sans KR", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
@@ -68,12 +75,17 @@ nav a:hover {
 }
 
 main {
+  min-width: 0;
+  width: 100%;
   padding: 28px;
   display: grid;
   gap: 24px;
 }
 
 .section {
+  min-width: 0;
+  width: 100%;
+  max-width: 100%;
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -112,6 +124,7 @@ h3 {
 }
 
 button {
+  max-width: 100%;
   border: 0;
   border-radius: 6px;
   padding: 10px 14px;
@@ -119,6 +132,7 @@ button {
   color: white;
   font-weight: 700;
   cursor: pointer;
+  overflow-wrap: anywhere;
 }
 
 button.secondary {
@@ -216,7 +230,7 @@ button.danger-button {
 
 .metrics {
   display: grid;
-  grid-template-columns: repeat(5, minmax(150px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 190px), 1fr));
   align-items: start;
   gap: 12px;
 }
@@ -308,7 +322,7 @@ button.danger-button {
 
 .cash-platform-grid {
   display: grid;
-  grid-template-columns: repeat(4, minmax(120px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 160px), 1fr));
   gap: 8px;
 }
 
@@ -350,8 +364,12 @@ button.danger-button {
 
 .split {
   display: grid;
-  grid-template-columns: 1.3fr 0.7fr;
+  grid-template-columns: minmax(0, 1.3fr) minmax(0, 0.7fr);
   gap: 18px;
+}
+
+.split > div {
+  min-width: 0;
 }
 
 .asset-header {
@@ -1037,6 +1055,21 @@ select {
   text-align: center;
 }
 
+@media (max-width: 1200px) {
+  .metrics {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .cash-grid,
+  .filters {
+    grid-template-columns: 1fr;
+  }
+
+  .split {
+    grid-template-columns: 1fr;
+  }
+}
+
 @media (max-width: 980px) {
   body {
     grid-template-columns: 1fr;
@@ -1047,6 +1080,34 @@ select {
     height: auto;
     min-height: auto;
     overflow-y: visible;
+    padding: 16px;
+    gap: 14px;
+  }
+
+  .sidebar > div {
+    display: flex;
+    align-items: baseline;
+    flex-wrap: wrap;
+    gap: 6px 12px;
+  }
+
+  .sidebar h1 {
+    font-size: 20px;
+  }
+
+  .sidebar p {
+    margin: 0;
+  }
+
+  nav {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+  }
+
+  nav a {
+    padding: 8px 10px;
+    font-size: 14px;
   }
 
   .metrics,
@@ -1061,12 +1122,17 @@ select {
   }
 
   .cash-platform-grid {
-    grid-template-columns: repeat(2, minmax(120px, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 140px), 1fr));
   }
 
   .section-title {
     align-items: flex-start;
     flex-direction: column;
+  }
+
+  .actions {
+    width: 100%;
+    justify-content: flex-start;
   }
 
   .dca-item-row {
@@ -1090,4 +1156,140 @@ select {
   main {
     padding: 16px;
   }
+}
+
+@media (max-width: 760px) {
+  main {
+    padding: 12px;
+    gap: 16px;
+  }
+
+  .section {
+    padding: 16px;
+  }
+
+  h2 {
+    font-size: 22px;
+  }
+
+  .metric,
+  .cash-total-card {
+    min-height: 0;
+  }
+
+  .metric strong,
+  .cash-total-card strong {
+    font-size: 22px;
+    overflow-wrap: anywhere;
+  }
+
+  .strategy-card,
+  .strategy-card-actions,
+  .strategy-card-title,
+  .strategy-meta,
+  .alias-dialog-actions,
+  .strategy-dialog-actions {
+    flex-wrap: wrap;
+  }
+
+  .strategy-card-actions,
+  .alias-dialog-actions,
+  .strategy-dialog-actions {
+    justify-content: flex-start;
+  }
+
+  .strategy-card-main p {
+    overflow: visible;
+    text-overflow: clip;
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+
+  .table {
+    overflow: visible;
+    border: 0;
+    border-radius: 0;
+  }
+
+  .table table,
+  .table tbody,
+  .table tr,
+  .table td {
+    display: block;
+    width: 100%;
+    min-width: 0;
+  }
+
+  .table table {
+    border-collapse: separate;
+    border-spacing: 0 10px;
+  }
+
+  .table thead {
+    display: none;
+  }
+
+  .table tr {
+    overflow: hidden;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+  }
+
+  .table td {
+    display: grid;
+    grid-template-columns: minmax(88px, 0.8fr) minmax(0, 1.2fr);
+    gap: 10px;
+    padding: 9px 10px;
+    text-align: right;
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+
+  .table td::before {
+    content: attr(data-label);
+    color: var(--muted);
+    font-size: 12px;
+    font-weight: 700;
+    text-align: left;
+  }
+
+  .table td[colspan] {
+    display: block;
+    text-align: center;
+  }
+
+  .table td[colspan]::before {
+    content: none;
+  }
+
+  .sync-dialog,
+  .strategy-dialog,
+  .alias-dialog {
+    width: calc(100vw - 24px);
+  }
+
+  .sync-dialog-header,
+  .strategy-dialog-header,
+  .sync-dialog-actions,
+  .sync-platform-grid,
+  .api-key-grid,
+  .alias-form-body,
+  .alias-dialog-actions,
+  .strategy-form-body,
+  .strategy-dialog-actions {
+    padding-left: 16px;
+    padding-right: 16px;
+  }
+
+  .strategy-preview {
+    margin-left: 16px;
+    margin-right: 16px;
+  }
+}
+
+.section-title > *,
+.strategy-card > *,
+.sync-dialog-header > *,
+.strategy-dialog-header > * {
+  min-width: 0;
 }
