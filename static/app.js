@@ -1,6 +1,9 @@
 const won = new Intl.NumberFormat("ko-KR", { style: "currency", currency: "KRW", maximumFractionDigits: 0 });
 const number = new Intl.NumberFormat("ko-KR", { maximumFractionDigits: 6 });
 const fxNumber = new Intl.NumberFormat("ko-KR", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const DASHBOARD_REFRESH_INTERVAL_MS = 60_000;
+
+let portfolioRefreshPromise = null;
 
 const state = {
   platforms: [],
@@ -464,21 +467,52 @@ function weekdayLabel(value) {
   return { monday: "월요일", tuesday: "화요일", wednesday: "수요일", thursday: "목요일", friday: "금요일", saturday: "토요일", sunday: "일요일" }[value] ?? value;
 }
 
-async function refresh() {
-  const [platforms, summary, syncStatus, strategyCapabilities] = await Promise.all([
-    api("/api/platforms"),
-    api("/api/portfolio/summary"),
-    api("/api/sync/status"),
+async function refreshPortfolio({ force = false } = {}) {
+  if (portfolioRefreshPromise) {
+    if (!force) return portfolioRefreshPromise;
+    try {
+      await portfolioRefreshPromise;
+    } catch {
+      // A forced refresh should retry after an earlier automatic refresh failed.
+    }
+  }
+
+  const request = (async () => {
+    const [platforms, summary, syncStatus] = await Promise.all([
+      api("/api/platforms"),
+      api("/api/portfolio/summary"),
+      api("/api/sync/status"),
+    ]);
+    state.platforms = platforms;
+    state.summary = summary;
+    state.syncStatus = syncStatus;
+    renderSyncStatus(syncStatus);
+    renderPlatforms();
+    renderPortfolio(summary);
+  })();
+  portfolioRefreshPromise = request;
+
+  try {
+    return await request;
+  } finally {
+    if (portfolioRefreshPromise === request) portfolioRefreshPromise = null;
+  }
+}
+
+async function refresh({ forcePortfolio = false } = {}) {
+  const [, strategyCapabilities] = await Promise.all([
+    refreshPortfolio({ force: forcePortfolio }),
     api("/api/strategy-capabilities"),
   ]);
-  state.platforms = platforms;
-  state.summary = summary;
-  state.syncStatus = syncStatus;
   state.strategyCapabilities = strategyCapabilities;
-  renderSyncStatus(syncStatus);
-  renderPlatforms();
-  renderPortfolio(summary);
   await Promise.all([renderOrders(), renderStrategyRuns(), renderStrategies()]);
+}
+
+function refreshVisiblePortfolio() {
+  if (document.visibilityState !== "visible") return;
+  refreshPortfolio().catch((error) => {
+    console.error("화면 자동 갱신 실패", error);
+  });
 }
 
 function formObject(form) {
@@ -627,7 +661,7 @@ async function syncHoldings(path, label) {
   try {
     const result = await api(path, { method: "POST" });
     renderSyncResult(result);
-    await refresh();
+    await refresh({ forcePortfolio: true });
   } catch (error) {
     const detail = error.data?.error || error.data?.results?.find((item) => item.error)?.error || error.message;
     message.textContent = `${label} 동기화 실패: ${detail}`;
@@ -1015,3 +1049,7 @@ document.querySelector("#strategiesList").addEventListener("click", async (event
 refresh().catch((error) => {
   document.body.innerHTML = `<main><section class="section"><h2>초기화 실패</h2><p>${escapeHtml(error.message)}</p></section></main>`;
 });
+
+setInterval(refreshVisiblePortfolio, DASHBOARD_REFRESH_INTERVAL_MS);
+document.addEventListener("visibilitychange", refreshVisiblePortfolio);
+window.addEventListener("focus", refreshVisiblePortfolio);
