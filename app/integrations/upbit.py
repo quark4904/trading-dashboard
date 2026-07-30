@@ -39,6 +39,9 @@ class UpbitClient:
             return []
         return self._request("GET", "/v1/ticker", auth=False, params={"markets": ",".join(markets)})
 
+    def order_chance(self, market: str) -> dict[str, Any]:
+        return self._request("GET", "/v1/orders/chance", params={"market": market})
+
     def _request(
         self,
         method: str,

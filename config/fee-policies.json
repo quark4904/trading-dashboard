@@ -1,0 +1,90 @@
+{
+  "schema_version": 1,
+  "policy_version": "2026-07-30",
+  "platforms": {
+    "upbit": {
+      "markets": {
+        "crypto": {
+          "fee_pct": 0.05,
+          "buy_tax_pct": 0,
+          "dynamic_fee": "upbit_orders_chance",
+          "source": {
+            "label": "업비트 KRW 마켓 공식 수수료",
+            "url": "https://docs.upbit.com/kr/kr/docs/upbit-strategy-toolkit-reference",
+            "checked_on": "2026-07-30"
+          }
+        }
+      }
+    },
+    "toss": {
+      "markets": {
+        "domestic": {
+          "fee_pct": 0.015,
+          "buy_tax_pct": 0,
+          "default_venue": "KRX",
+          "venue_fee_pct": {
+            "KRX": 0.015,
+            "NXT": 0.014
+          },
+          "source": {
+            "label": "토스증권 Open API 국내주식 공식 수수료",
+            "url": "https://p.tossinvest.com/ko/open-api",
+            "checked_on": "2026-07-30"
+          }
+        },
+        "overseas": {
+          "fee_pct": 0.1,
+          "buy_tax_pct": 0,
+          "fee_waiver": {
+            "notional_lte": 10,
+            "fee_pct": 0,
+            "label": "주문건별 총 체결금액 10 USD 이하 수수료 면제"
+          },
+          "source": {
+            "label": "토스증권 Open API 미국주식 공식 수수료",
+            "url": "https://p.tossinvest.com/ko/open-api",
+            "checked_on": "2026-07-30"
+          }
+        }
+      }
+    },
+    "kis_pension": {
+      "markets": {
+        "domestic": {
+          "fee_pct": 0.0140527,
+          "buy_tax_pct": 0,
+          "default_asset_type": "stock",
+          "asset_type_fee_pct": {
+            "stock": 0.0140527,
+            "etf": 0.0146527,
+            "etn": 0.0146527
+          },
+          "source": {
+            "label": "한국투자증권 BanKIS 온라인 KRX 기본 수수료",
+            "url": "https://eng.truefriend.com/main/customer/guide/_static/TF04ae010000.jsp?tab=3",
+            "checked_on": "2026-07-30"
+          }
+        }
+      }
+    },
+    "kis_isa": {
+      "markets": {
+        "domestic": {
+          "fee_pct": 0.0140527,
+          "buy_tax_pct": 0,
+          "default_asset_type": "stock",
+          "asset_type_fee_pct": {
+            "stock": 0.0140527,
+            "etf": 0.0146527,
+            "etn": 0.0146527
+          },
+          "source": {
+            "label": "한국투자증권 BanKIS 온라인 KRX 기본 수수료",
+            "url": "https://eng.truefriend.com/main/customer/guide/_static/TF04ae010000.jsp?tab=3",
+            "checked_on": "2026-07-30"
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 import tempfile
@@ -10,6 +11,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from app.config import api_key_expirations
+from app.fee_policies import FeePolicyStore
 from app.integrations.fx import FxError, usd_krw_rate
 from app.order_costs import estimate_dca_buy_cost
 from app.repository import Repository
@@ -231,7 +233,7 @@ class ValidationTests(unittest.TestCase):
                 ],
                 "interval": "daily",
                 "execution_time": "22:30",
-                "cost_assumptions": {"fee_pct": 0.0, "tax_pct": 0.0, "slippage_pct": 0.0},
+                "cost_overrides": {"fee_pct": None, "tax_pct": None, "slippage_pct": 0.0},
             },
         )
 
@@ -328,7 +330,7 @@ class ValidationTests(unittest.TestCase):
             [{"symbol": "KRW-BTC", "market": "crypto", "order_type": "amount", "currency": "KRW", "amount": 5000}],
         )
 
-    def test_dca_normalizes_and_validates_cost_assumptions(self) -> None:
+    def test_dca_normalizes_and_validates_cost_overrides(self) -> None:
         result = validate_strategy(
             {
                 "name": "비용 반영 DCA",
@@ -336,7 +338,7 @@ class ValidationTests(unittest.TestCase):
                 "platform": "upbit",
                 "params": {
                     "items": [{"symbol": "KRW-BTC", "value": 5000}],
-                    "cost_assumptions": {
+                    "cost_overrides": {
                         "fee_pct": "0.05",
                         "tax_pct": 0,
                         "slippage_pct": "0.1",
@@ -346,7 +348,7 @@ class ValidationTests(unittest.TestCase):
         )
 
         self.assertEqual(
-            result["params"]["cost_assumptions"],
+            result["params"]["cost_overrides"],
             {"fee_pct": 0.05, "tax_pct": 0.0, "slippage_pct": 0.1},
         )
         for invalid_rate in (-0.1, 100.1, "nan", "invalid"):
@@ -358,7 +360,7 @@ class ValidationTests(unittest.TestCase):
                         "platform": "upbit",
                         "params": {
                             "items": [{"symbol": "KRW-BTC", "value": 5000}],
-                            "cost_assumptions": {"fee_pct": invalid_rate},
+                            "cost_overrides": {"fee_pct": invalid_rate},
                         },
                     }
                 )
@@ -370,7 +372,7 @@ class ValidationTests(unittest.TestCase):
                     "platform": "upbit",
                     "params": {
                         "items": [{"symbol": "KRW-BTC", "value": 5000}],
-                        "cost_assumptions": [],
+                        "cost_overrides": [],
                     },
                 }
             )
@@ -392,17 +394,89 @@ class OrderCostTests(unittest.TestCase):
     def test_quantity_order_requires_reference_price(self) -> None:
         missing = estimate_dca_buy_cost(
             {"order_type": "quantity", "quantity": 2},
-            {"fee_pct": 0.1},
+            {"fee_pct": 0.1, "tax_pct": 0, "slippage_pct": 0},
         )
         estimated = estimate_dca_buy_cost(
             {"order_type": "quantity", "quantity": 2},
-            {"fee_pct": 0.1},
+            {"fee_pct": 0.1, "tax_pct": 0, "slippage_pct": 0},
             reference_price=10_000,
         )
 
         self.assertIsNone(missing["estimated_total"])
         self.assertEqual(estimated["estimated_notional"], 20_000)
         self.assertEqual(estimated["estimated_total"], 20_020)
+
+
+class FeePolicyTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.store = FeePolicyStore()
+
+    def test_applies_official_platform_defaults_and_toss_waiver(self) -> None:
+        upbit = self.store.resolve_cost_profile(
+            "upbit",
+            {"market": "crypto"},
+            notional=5000,
+        )
+        toss_waived = self.store.resolve_cost_profile(
+            "toss",
+            {"market": "overseas"},
+            notional=10,
+        )
+        toss_standard = self.store.resolve_cost_profile(
+            "toss",
+            {"market": "overseas"},
+            notional=10.01,
+        )
+
+        self.assertEqual(upbit["fee_pct"], 0.05)
+        self.assertEqual(upbit["fee_source"]["kind"], "official_policy")
+        self.assertEqual(toss_waived["fee_pct"], 0)
+        self.assertEqual(toss_standard["fee_pct"], 0.1)
+
+    def test_live_fee_takes_priority_over_user_override(self) -> None:
+        profile = self.store.resolve_cost_profile(
+            "upbit",
+            {"market": "crypto"},
+            notional=5000,
+            cost_overrides={"fee_pct": 0.2},
+            live_fee={
+                "fee_pct": 0.03,
+                "label": "테스트 실시간 요율",
+                "checked_at": "2026-07-30T00:00:00+00:00",
+            },
+        )
+
+        self.assertEqual(profile["fee_pct"], 0.03)
+        self.assertEqual(profile["fee_source"]["kind"], "live_api")
+
+    def test_policy_file_changes_apply_on_next_resolution(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "fees.json"
+            policy = {
+                "schema_version": 1,
+                "policy_version": "test-1",
+                "platforms": {
+                    "upbit": {
+                        "markets": {
+                            "crypto": {
+                                "fee_pct": 0.07,
+                                "buy_tax_pct": 0,
+                                "source": {"label": "테스트 정책"},
+                            }
+                        }
+                    }
+                },
+            }
+            path.write_text(json.dumps(policy), encoding="utf-8")
+            store = FeePolicyStore(path)
+
+            first = store.resolve_cost_profile("upbit", {"market": "crypto"}, notional=5000)
+            policy["platforms"]["upbit"]["markets"]["crypto"]["fee_pct"] = 0.08
+            path.write_text(json.dumps(policy), encoding="utf-8")
+            second = store.resolve_cost_profile("upbit", {"market": "crypto"}, notional=5000)
+
+        self.assertEqual(first["fee_pct"], 0.07)
+        self.assertEqual(second["fee_pct"], 0.08)
 
 
 class StrategyCapabilityTests(unittest.TestCase):
@@ -494,7 +568,7 @@ class StrategyRunTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.repo = Repository(Path(self.temp_dir.name) / "dashboard.db")
-        self.service = TradingService(self.repo)
+        self.service = TradingService(self.repo, upbit_fee_provider=lambda _: None)
         self.strategy = self.repo.create_strategy(
             validate_strategy(
                 {
@@ -505,9 +579,7 @@ class StrategyRunTests(unittest.TestCase):
                         "items": [{"symbol": "KRW-BTC", "value": 5000}],
                         "interval": "daily",
                         "execution_time": "09:30",
-                        "cost_assumptions": {
-                            "fee_pct": 0.05,
-                            "tax_pct": 0,
+                        "cost_overrides": {
                             "slippage_pct": 0.1,
                         },
                     },
@@ -531,6 +603,40 @@ class StrategyRunTests(unittest.TestCase):
         self.assertEqual(history[0]["orders"][0]["estimated_fee"], 2.5)
         self.assertEqual(history[0]["orders"][0]["estimated_slippage"], 5)
         self.assertEqual(history[0]["orders"][0]["estimated_total"], 5007.5)
+        self.assertEqual(
+            history[0]["orders"][0]["cost_profile"]["fee_source"]["kind"],
+            "official_policy",
+        )
+
+    def test_upbit_live_fee_overrides_policy_default(self) -> None:
+        service = TradingService(
+            self.repo,
+            upbit_fee_provider=lambda _: {
+                "fee_pct": 0.03,
+                "label": "업비트 테스트 조회",
+                "checked_at": "2026-07-30T00:00:00+00:00",
+            },
+        )
+
+        service.run_dca_strategy_now(self.strategy["id"])
+
+        order = self.repo.orders()[0]
+        self.assertEqual(order["cost_profile"]["fee_pct"], 0.03)
+        self.assertEqual(order["cost_profile"]["fee_source"]["kind"], "live_api")
+        self.assertEqual(order["estimated_fee"], 1.5)
+
+    def test_upbit_fee_lookup_failure_uses_policy_default(self) -> None:
+        service = TradingService(
+            self.repo,
+            upbit_fee_provider=lambda _: {"error": "offline"},
+        )
+
+        service.run_dca_strategy_now(self.strategy["id"])
+
+        order = self.repo.orders()[0]
+        self.assertEqual(order["cost_profile"]["fee_pct"], 0.05)
+        self.assertEqual(order["cost_profile"]["fee_source"]["kind"], "official_policy")
+        self.assertEqual(order["cost_profile"]["live_fee_lookup"]["status"], "fallback")
 
     def test_quantity_order_uses_latest_holding_price_for_cost_estimate(self) -> None:
         self.repo.replace_platform_holdings(
@@ -555,7 +661,6 @@ class StrategyRunTests(unittest.TestCase):
                     "platform": "kis_isa",
                     "params": {
                         "items": [{"symbol": "458730", "value": 2}],
-                        "cost_assumptions": {"fee_pct": 0.1},
                     },
                 }
             )
@@ -566,8 +671,9 @@ class StrategyRunTests(unittest.TestCase):
         order = self.repo.orders()[0]
         self.assertEqual(order["reference_price"], 12_000)
         self.assertEqual(order["estimated_notional"], 24_000)
-        self.assertEqual(order["estimated_fee"], 24)
-        self.assertEqual(order["estimated_total"], 24_024)
+        self.assertEqual(order["cost_profile"]["fee_pct"], 0.0146527)
+        self.assertEqual(order["estimated_fee"], 3.516648)
+        self.assertEqual(order["estimated_total"], 24_003.516648)
 
     def test_due_run_executes_once_per_scheduled_minute(self) -> None:
         now = datetime(2026, 7, 12, 9, 30, tzinfo=KST)

@@ -1,5 +1,6 @@
 const won = new Intl.NumberFormat("ko-KR", { style: "currency", currency: "KRW", maximumFractionDigits: 0 });
 const number = new Intl.NumberFormat("ko-KR", { maximumFractionDigits: 6 });
+const rateNumber = new Intl.NumberFormat("ko-KR", { maximumFractionDigits: 7 });
 const fxNumber = new Intl.NumberFormat("ko-KR", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const DASHBOARD_REFRESH_INTERVAL_MS = 60_000;
 
@@ -356,20 +357,23 @@ function formatOrderAmount(item) {
 
 function formatCurrencyAmount(value, currency) {
   if (value == null) return "-";
-  return currency === "USD" ? `$${number.format(value)}` : won.format(value);
+  return currency === "USD" ? `$${number.format(value)}` : `₩${number.format(value)}`;
 }
 
 function formatOrderCosts(item) {
   if (item.estimated_notional == null) return "기준가 없음";
+  const profile = item.cost_profile || {};
+  const feeSource = profile.fee_source?.label ? ` · ${escapeHtml(profile.fee_source.label)}` : "";
+  const liveFallback = profile.live_fee_lookup?.status === "fallback" ? " · 실시간 조회 실패" : "";
   return `
     <div class="order-cost-breakdown">
       <strong>${formatCurrencyAmount(
         (item.estimated_fee || 0) + (item.estimated_tax || 0) + (item.estimated_slippage || 0),
         item.currency,
       )}</strong>
-      <span>수수료 ${formatCurrencyAmount(item.estimated_fee, item.currency)}</span>
-      <span>세금 ${formatCurrencyAmount(item.estimated_tax, item.currency)}</span>
-      <span>슬리피지 ${formatCurrencyAmount(item.estimated_slippage, item.currency)}</span>
+      <span>수수료 ${formatCurrencyAmount(item.estimated_fee, item.currency)} (${rateNumber.format(profile.fee_pct ?? 0)}%${feeSource}${liveFallback})</span>
+      <span>세금 ${formatCurrencyAmount(item.estimated_tax, item.currency)} (${rateNumber.format(profile.tax_pct ?? 0)}%)</span>
+      <span>슬리피지 ${formatCurrencyAmount(item.estimated_slippage, item.currency)} (${rateNumber.format(profile.slippage_pct ?? 0)}%)</span>
     </div>`;
 }
 
@@ -569,9 +573,9 @@ function formObject(form) {
       items,
       interval: data.interval,
       execution_time: data.execution_time,
-      cost_assumptions: {
-        fee_pct: Number(data.fee_pct || 0),
-        tax_pct: Number(data.tax_pct || 0),
+      cost_overrides: {
+        fee_pct: data.fee_pct === "" ? null : Number(data.fee_pct),
+        tax_pct: data.tax_pct === "" ? null : Number(data.tax_pct),
         slippage_pct: Number(data.slippage_pct || 0),
       },
     };
@@ -993,9 +997,10 @@ function openStrategyDialog(strategy = null) {
     updateExecutionDayField();
     if (strategy.params?.execution_day) form.elements.execution_day.value = strategy.params.execution_day;
     form.elements.execution_time.value = strategy.params?.execution_time || "23:30";
-    form.elements.fee_pct.value = strategy.params?.cost_assumptions?.fee_pct ?? 0;
-    form.elements.tax_pct.value = strategy.params?.cost_assumptions?.tax_pct ?? 0;
-    form.elements.slippage_pct.value = strategy.params?.cost_assumptions?.slippage_pct ?? 0;
+    const costOverrides = strategyCostOverrides(strategy.params);
+    form.elements.fee_pct.value = costOverrides.fee_pct ?? "";
+    form.elements.tax_pct.value = costOverrides.tax_pct ?? "";
+    form.elements.slippage_pct.value = costOverrides.slippage_pct ?? 0;
     if (strategy.strategy_type === "dca") {
       document.querySelector("#dcaItemRows").replaceChildren();
       for (const item of dcaItems(strategy, strategy.platform)) {
@@ -1031,8 +1036,8 @@ function updateStrategyPreview() {
       .filter(Boolean)
       .join(", ") || "선택한 자산";
     const costs = [
-      `수수료 ${number.format(Number(form.elements.fee_pct.value || 0))}%`,
-      `세금 ${number.format(Number(form.elements.tax_pct.value || 0))}%`,
+      form.elements.fee_pct.value === "" ? "수수료 공식 자동" : `수수료 직접 설정 ${number.format(Number(form.elements.fee_pct.value))}%`,
+      form.elements.tax_pct.value === "" ? "매수 세금 자동" : `세금 직접 설정 ${number.format(Number(form.elements.tax_pct.value))}%`,
       `슬리피지 ${number.format(Number(form.elements.slippage_pct.value || 0))}%`,
     ].join(", ");
     description = `${platform}에서 ${scheduleLabel({ interval: form.elements.interval.value, execution_time: form.elements.execution_time.value, execution_day: form.elements.execution_day.value })}에 다음 자산을 매수합니다: ${assets}. 비용 가정: ${costs}.`;
@@ -1040,6 +1045,15 @@ function updateStrategyPreview() {
     description = `${platform}에서 ${won.format(Number(form.elements.budget.value || 0))} 예산으로 ${form.elements.strategy_type.value} 전략을 운용합니다.`;
   }
   document.querySelector("#strategyPreview").innerHTML = `<span>저장 전 확인</span><strong>${escapeHtml(name)}</strong><p>${escapeHtml(description)}</p>`;
+}
+
+function strategyCostOverrides(params = {}) {
+  if (params.cost_overrides) return params.cost_overrides;
+  const legacy = params.cost_assumptions;
+  if (!legacy || Object.values(legacy).every((value) => Number(value || 0) === 0)) {
+    return { fee_pct: null, tax_pct: null, slippage_pct: 0 };
+  }
+  return legacy;
 }
 
 document.querySelector("#newStrategyButton").addEventListener("click", () => openStrategyDialog());

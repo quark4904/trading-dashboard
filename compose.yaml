@@ -6,6 +6,7 @@ services:
     environment:
       TZ: Asia/Seoul
       TRADING_DASHBOARD_DB_PATH: /data/trading_dashboard.db
+      TRADING_DASHBOARD_FEE_POLICY_PATH: ${TRADING_DASHBOARD_FEE_POLICY_PATH:-/app/config/fee-policies.json}
       TRADING_DASHBOARD_SEED_DEMO: ${TRADING_DASHBOARD_SEED_DEMO:-false}
       UPBIT_ACCESS_KEY: ${UPBIT_ACCESS_KEY:-}
       UPBIT_SECRET_KEY: ${UPBIT_SECRET_KEY:-}
@@ -36,6 +37,7 @@ services:
       - "127.0.0.1:8765:8765"
     volumes:
       - ./data:/data
+      - ./config:/app/config:ro
     healthcheck:
       test: ["CMD", "python", "-c", "from urllib.request import urlopen; urlopen('http://127.0.0.1:8765/api/health', timeout=3).read()"]
       interval: 30s

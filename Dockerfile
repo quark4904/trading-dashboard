@@ -6,6 +6,7 @@ ENV TRADING_DASHBOARD_DB_PATH=/data/trading_dashboard.db
 WORKDIR /app
 
 COPY app ./app
+COPY config ./config
 COPY static ./static
 
 RUN mkdir -p /data

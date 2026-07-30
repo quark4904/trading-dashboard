@@ -388,13 +388,16 @@ class Repository:
 
     def orders(self) -> list[dict[str, Any]]:
         with self.connect() as conn:
-            return [dict(row) for row in conn.execute("SELECT * FROM orders ORDER BY id DESC LIMIT 100")]
+            return [
+                self._order_row(row)
+                for row in conn.execute("SELECT * FROM orders ORDER BY id DESC LIMIT 100")
+            ]
 
     def holding_quote(self, platform: str, symbol: str) -> dict[str, Any] | None:
         with self.connect() as conn:
             row = conn.execute(
                 """
-                SELECT current_price, currency, updated_at
+                SELECT current_price, currency, asset_type, updated_at
                 FROM holdings
                 WHERE platform = ? AND symbol = ?
                 ORDER BY id DESC
@@ -515,11 +518,33 @@ class Repository:
             ).fetchall()
             orders_by_run: dict[int, list[dict[str, Any]]] = {}
             for row in order_rows:
-                order = dict(row)
+                order = self._order_row(row)
                 orders_by_run.setdefault(order["strategy_run_id"], []).append(order)
             for run in result:
                 run["orders"] = orders_by_run.get(run["id"], [])
             return result
+
+    @staticmethod
+    def _order_row(row: sqlite3.Row) -> dict[str, Any]:
+        order = dict(row)
+        try:
+            request = json.loads(order.get("request_json") or "{}")
+        except json.JSONDecodeError:
+            request = {}
+        cost_profile = request.get("cost_profile")
+        legacy = request.get("cost_assumptions")
+        if not isinstance(cost_profile, dict) and isinstance(legacy, dict):
+            cost_profile = {
+                "fee_pct": legacy.get("fee_pct", 0),
+                "tax_pct": legacy.get("tax_pct", 0),
+                "slippage_pct": legacy.get("slippage_pct", 0),
+                "fee_source": {
+                    "kind": "legacy_user_assumption",
+                    "label": "기존 사용자 비용 가정",
+                },
+            }
+        order["cost_profile"] = cost_profile
+        return order
 
     def strategies(self) -> list[dict[str, Any]]:
         with self.connect() as conn:

@@ -1,15 +1,20 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Callable
 
 from app.config import platform_configs
+from app.fee_policies import FeePolicyStore
 from app.integrations.fx import usd_krw_rate
 from app.integrations.kis import KISClient, kis_accounts
 from app.integrations.tossinvest import TossInvestClient
 from app.integrations.upbit import UpbitClient
-from app.order_costs import estimate_dca_buy_cost, normalize_cost_assumptions
+from app.order_costs import (
+    cost_overrides_from_params,
+    dca_order_notional,
+    estimate_dca_buy_cost,
+)
 from app.repository import Repository
 from app.scheduler import KST, scheduled_slot
 from app.strategy_capabilities import compile_dca_buy_request
@@ -19,8 +24,16 @@ DUST_VALUE_THRESHOLD = 100
 
 
 class TradingService:
-    def __init__(self, repo: Repository):
+    def __init__(
+        self,
+        repo: Repository,
+        *,
+        fee_policy_store: FeePolicyStore | None = None,
+        upbit_fee_provider: Callable[[str], dict[str, Any] | None] | None = None,
+    ):
         self.repo = repo
+        self.fee_policy_store = fee_policy_store or FeePolicyStore()
+        self.upbit_fee_provider = upbit_fee_provider or self._fetch_upbit_fee
 
     def platforms(self) -> list[dict[str, Any]]:
         configs = platform_configs()
@@ -352,15 +365,39 @@ class TradingService:
             items = strategy.get("params", {}).get("items") or []
             if not items:
                 raise ValueError("DCA 주문 항목이 없습니다.")
-            cost_assumptions = normalize_cost_assumptions(
-                strategy.get("params", {}).get("cost_assumptions")
-            )
+            cost_overrides = cost_overrides_from_params(strategy.get("params"))
             for item in items:
                 compiled = compile_dca_buy_request(strategy["platform"], item)
+                quote = self._dca_reference_quote(strategy["platform"], item)
+                reference_price = float(quote["current_price"]) if quote else None
+                notional = dca_order_notional(item, reference_price)
+                live_fee_result = (
+                    self.upbit_fee_provider(item["symbol"])
+                    if strategy["platform"] == "upbit"
+                    else None
+                )
+                live_fee = (
+                    live_fee_result
+                    if live_fee_result and live_fee_result.get("fee_pct") is not None
+                    else None
+                )
+                cost_profile = self.fee_policy_store.resolve_cost_profile(
+                    strategy["platform"],
+                    item,
+                    notional=notional,
+                    asset_type=quote.get("asset_type") if quote else None,
+                    cost_overrides=cost_overrides,
+                    live_fee=live_fee,
+                )
+                if live_fee_result and live_fee_result.get("error"):
+                    cost_profile["live_fee_lookup"] = {
+                        "status": "fallback",
+                        "error": str(live_fee_result["error"]),
+                    }
                 cost_estimate = estimate_dca_buy_cost(
                     item,
-                    cost_assumptions,
-                    reference_price=self._dca_reference_price(strategy["platform"], item),
+                    cost_profile,
+                    reference_price=reference_price,
                 )
                 request = {
                     "platform": strategy["platform"],
@@ -372,7 +409,8 @@ class TradingService:
                     "currency": item.get("currency", "KRW"),
                     "dry_run": True,
                     "compiled_request": compiled,
-                    "cost_assumptions": cost_assumptions,
+                    "cost_overrides": cost_overrides,
+                    "cost_profile": cost_profile,
                     **cost_estimate,
                 }
                 self.repo.create_order(
@@ -385,14 +423,31 @@ class TradingService:
         except Exception as exc:
             return self.repo.finish_strategy_run(run["id"], status="failed", error=str(exc))
 
-    def _dca_reference_price(self, platform: str, item: dict[str, Any]) -> float | None:
+    def _dca_reference_quote(
+        self,
+        platform: str,
+        item: dict[str, Any],
+    ) -> dict[str, Any] | None:
         if item.get("order_type") != "quantity":
             return None
         quote = self.repo.holding_quote(platform, item["symbol"])
         if not quote or quote["currency"] != item.get("currency", "KRW"):
             return None
         price = float(quote["current_price"])
-        return price if price > 0 else None
+        return quote if price > 0 else None
+
+    @staticmethod
+    def _fetch_upbit_fee(market: str) -> dict[str, Any]:
+        try:
+            data = UpbitClient().order_chance(market)
+            return {
+                "fee_pct": float(data["bid_fee"]) * 100,
+                "label": "업비트 주문 가능 정보 API",
+                "url": "https://docs.upbit.com/kr/kr/reference/available-order-information",
+                "checked_at": datetime.now(timezone.utc).isoformat(),
+            }
+        except Exception as exc:
+            return {"error": str(exc)}
 
     def _run_sync(self, platform: str, sync: Callable[[], dict[str, Any]]) -> dict[str, Any]:
         sync_id = self.repo.start_sync(platform)
