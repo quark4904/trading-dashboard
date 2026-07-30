@@ -31,6 +31,15 @@ def env_flag(name: str, default: bool = False) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def execution_history_days() -> int:
+    load_env()
+    try:
+        days = int(os.getenv("TRADING_DASHBOARD_EXECUTION_HISTORY_DAYS", "90"))
+    except ValueError:
+        days = 90
+    return max(1, min(days, 90))
+
+
 @dataclass(frozen=True)
 class PlatformConfig:
     code: str

@@ -8,7 +8,7 @@ import os
 import uuid
 from typing import Any
 from urllib.error import HTTPError
-from urllib.parse import urlencode
+from urllib.parse import unquote, urlencode
 from urllib.request import Request, urlopen
 
 from app.config import load_env
@@ -42,15 +42,33 @@ class UpbitClient:
     def order_chance(self, market: str) -> dict[str, Any]:
         return self._request("GET", "/v1/orders/chance", params={"market": market})
 
+    def closed_orders(
+        self,
+        *,
+        start_time: str,
+        end_time: str,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        return self._request(
+            "GET",
+            "/v1/orders/closed",
+            params={
+                "start_time": start_time,
+                "end_time": end_time,
+                "limit": str(limit),
+                "order_by": "asc",
+            },
+        )
+
     def _request(
         self,
         method: str,
         path: str,
         *,
         auth: bool = True,
-        params: dict[str, str] | None = None,
+        params: dict[str, Any] | None = None,
     ) -> Any:
-        query = urlencode(params or {})
+        query = unquote(urlencode(params or {}, doseq=True))
         url = f"{self.base_url}{path}"
         if query:
             url = f"{url}?{query}"

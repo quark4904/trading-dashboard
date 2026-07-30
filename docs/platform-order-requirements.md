@@ -73,6 +73,41 @@ DCA 시장가 매수는 `POST /v1/orders`에 다음 JSON을 전달한다.
 우선 적용한다. 조회가 실패하면 정책 기본값을 사용하고 실패 사실을 주문의 비용 프로필에
 기록한다.
 
+## 실제 체결 이력 동기화
+
+잔고 동기화와 함께 최근 체결 주문을 가져와 `executions` 테이블에 외부 주문 ID 기준으로
+upsert한다. 기본 조회 기간은 90일이며 `TRADING_DASHBOARD_EXECUTION_HISTORY_DAYS`로
+1~90일 범위에서 변경할 수 있다.
+
+### 토스증권
+
+- `GET /api/v1/orders?status=CLOSED`
+- 커서 기반 페이지네이션을 끝까지 처리
+- `execution.filledQuantity`, `averageFilledPrice`, `filledAmount` 저장
+- `execution.commission`, `execution.tax`가 있으면 각각 실제 수수료·세금으로 저장
+- 공식 명세: <https://openapi.tossinvest.com/openapi-docs/latest/openapi.json>
+
+### 한국투자증권
+
+- 국내주식 `GET /uapi/domestic-stock/v1/trading/inquire-daily-ccld`
+- 최근 3개월 이내 실전 조회 TR ID `TTTC0081R`, 모의 조회 `VTTC0081R`
+- 연속조회 키와 `tr_cont`를 이용해 최대 10페이지 수집
+- 주문별 체결 수량·평균가·총체결금액을 저장
+- 주문별 실제 수수료 필드는 제공되지 않으므로 정책 파일의 공식 요율 계산값을 `추정`으로 저장
+- 공식 예제: <https://github.com/koreainvestment/open-trading-api/tree/main/examples_llm/domestic_stock/inquire_daily_ccld>
+
+### 업비트
+
+- `GET /v1/orders/closed`
+- 최대 조회 범위에 맞춰 7일 단위로 나눠 최근 이력을 수집
+- `executed_volume`, `executed_funds`, `paid_fee` 저장
+- `paid_fee`가 누락된 경우에만 공식 정책 요율로 추정
+- 공식 문서: <https://docs.upbit.com/kr/v1.5.9/reference/%EC%A2%85%EB%A3%8C-%EC%A3%BC%EB%AC%B8-%EC%A1%B0%ED%9A%8C>
+
+실제 수수료는 사후 정산의 최종값이고, 정책 요율은 주문 전 예상 비용과 API 필드 누락 시
+보조값이다. 제한된 기간의 체결 수수료를 현재 보유 자산 전체 원가에 자동 합산하면 오래된
+매수·매도 이력이 빠져 원가가 왜곡될 수 있으므로 현재는 체결 이력에서 별도로 표시한다.
+
 ## 구현 원칙
 
 - 프론트엔드는 `/api/strategy-capabilities`를 읽어 플랫폼과 시장에 필요한 입력만 표시한다.

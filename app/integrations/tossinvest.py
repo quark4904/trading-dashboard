@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import time
 from typing import Any
 from urllib.error import HTTPError
 from urllib.parse import urlencode
@@ -22,6 +23,8 @@ class TossInvestClient:
         self.client_id = os.getenv("TOSSINVEST_CLIENT_ID", "")
         self.client_secret = os.getenv("TOSSINVEST_CLIENT_SECRET", "")
         self.account_seq = os.getenv("TOSSINVEST_ACCOUNT_SEQ", "")
+        self._access_token = ""
+        self._token_expires_at = 0.0
         if not self.client_id or not self.client_secret or not self.account_seq:
             raise TossInvestError("토스증권 설정값이 부족합니다.")
 
@@ -39,7 +42,35 @@ class TossInvestClient:
         query = urlencode({"baseCurrency": base_currency, "quoteCurrency": quote_currency})
         return self._request("GET", f"/api/v1/exchange-rate?{query}")
 
+    def closed_orders(self, *, from_date: str, to_date: str) -> list[dict[str, Any]]:
+        orders: list[dict[str, Any]] = []
+        cursor = ""
+        seen_cursors: set[str] = set()
+        while True:
+            params = {
+                "status": "CLOSED",
+                "from": from_date,
+                "to": to_date,
+                "limit": "100",
+            }
+            if cursor:
+                params["cursor"] = cursor
+            data = self._request(
+                "GET",
+                f"/api/v1/orders?{urlencode(params)}",
+                headers={"x-tossinvest-account": self.account_seq},
+            )
+            result = data.get("result") or {}
+            orders.extend(result.get("orders") or [])
+            next_cursor = str(result.get("nextCursor") or "")
+            if not result.get("hasNext") or not next_cursor or next_cursor in seen_cursors:
+                return orders
+            seen_cursors.add(next_cursor)
+            cursor = next_cursor
+
     def _token(self) -> str:
+        if self._access_token and self._token_expires_at > time.time() + 60:
+            return self._access_token
         basic = base64.b64encode(f"{self.client_id}:{self.client_secret}".encode("utf-8")).decode("ascii")
         payload = urlencode({"grant_type": "client_credentials"}).encode("utf-8")
         data = self._request_raw(
@@ -56,7 +87,9 @@ class TossInvestClient:
         token = data.get("access_token")
         if not token:
             raise TossInvestError(f"토스증권 토큰 발급 실패: {data}")
-        return token
+        self._access_token = str(token)
+        self._token_expires_at = time.time() + int(data.get("expires_in") or 86400)
+        return self._access_token
 
     def _request(self, method: str, path: str, *, headers: dict[str, str] | None = None) -> dict[str, Any]:
         token = self._token()

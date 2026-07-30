@@ -71,6 +71,31 @@ class Repository:
                     request_json TEXT NOT NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS executions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    platform TEXT NOT NULL,
+                    external_order_id TEXT NOT NULL,
+                    ordered_at TEXT NOT NULL,
+                    executed_at TEXT,
+                    symbol TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    side TEXT NOT NULL,
+                    order_type TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    quantity REAL NOT NULL,
+                    average_price REAL NOT NULL,
+                    amount REAL NOT NULL,
+                    currency TEXT NOT NULL,
+                    actual_fee REAL,
+                    estimated_fee REAL,
+                    actual_tax REAL,
+                    estimated_tax REAL,
+                    cost_profile_json TEXT NOT NULL DEFAULT '{}',
+                    raw_json TEXT NOT NULL DEFAULT '{}',
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(platform, external_order_id)
+                );
+
                 CREATE TABLE IF NOT EXISTS strategies (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     name TEXT NOT NULL,
@@ -93,6 +118,7 @@ class Repository:
                     completed_at TEXT,
                     status TEXT NOT NULL,
                     synced_count INTEGER,
+                    execution_count INTEGER,
                     error TEXT
                 );
 
@@ -133,6 +159,11 @@ class Repository:
             }
             if "details_json" not in exchange_rate_columns:
                 conn.execute("ALTER TABLE exchange_rates ADD COLUMN details_json TEXT NOT NULL DEFAULT '{}'")
+            sync_run_columns = {
+                row["name"] for row in conn.execute("PRAGMA table_info(sync_runs)").fetchall()
+            }
+            if "execution_count" not in sync_run_columns:
+                conn.execute("ALTER TABLE sync_runs ADD COLUMN execution_count INTEGER")
             order_columns = {row["name"] for row in conn.execute("PRAGMA table_info(orders)").fetchall()}
             if "strategy_run_id" not in order_columns:
                 conn.execute("ALTER TABLE orders ADD COLUMN strategy_run_id INTEGER")
@@ -231,6 +262,114 @@ class Repository:
             )
             return len(rows)
 
+    def upsert_executions(self, platform: str, rows: list[dict[str, Any]]) -> int:
+        now = utc_now()
+        with self.connect() as conn:
+            conn.executemany(
+                """
+                INSERT INTO executions
+                (platform, external_order_id, ordered_at, executed_at, symbol, name, side, order_type, status,
+                 quantity, average_price, amount, currency, actual_fee, estimated_fee, actual_tax, estimated_tax,
+                 cost_profile_json, raw_json, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(platform, external_order_id) DO UPDATE SET
+                    ordered_at = excluded.ordered_at,
+                    executed_at = excluded.executed_at,
+                    symbol = excluded.symbol,
+                    name = excluded.name,
+                    side = excluded.side,
+                    order_type = excluded.order_type,
+                    status = excluded.status,
+                    quantity = excluded.quantity,
+                    average_price = excluded.average_price,
+                    amount = excluded.amount,
+                    currency = excluded.currency,
+                    actual_fee = COALESCE(excluded.actual_fee, executions.actual_fee),
+                    estimated_fee = CASE
+                        WHEN COALESCE(excluded.actual_fee, executions.actual_fee) IS NOT NULL THEN NULL
+                        ELSE excluded.estimated_fee
+                    END,
+                    actual_tax = COALESCE(excluded.actual_tax, executions.actual_tax),
+                    estimated_tax = CASE
+                        WHEN COALESCE(excluded.actual_tax, executions.actual_tax) IS NOT NULL THEN NULL
+                        ELSE excluded.estimated_tax
+                    END,
+                    cost_profile_json = CASE
+                        WHEN executions.actual_fee IS NOT NULL AND excluded.actual_fee IS NULL
+                            THEN executions.cost_profile_json
+                        ELSE excluded.cost_profile_json
+                    END,
+                    raw_json = excluded.raw_json,
+                    updated_at = excluded.updated_at
+                """,
+                [
+                    (
+                        platform,
+                        row["external_order_id"],
+                        row["ordered_at"],
+                        row.get("executed_at"),
+                        row["symbol"],
+                        row.get("name") or row["symbol"],
+                        row["side"],
+                        row.get("order_type") or "unknown",
+                        row.get("status") or "filled",
+                        row["quantity"],
+                        row["average_price"],
+                        row["amount"],
+                        row.get("currency") or "KRW",
+                        row.get("actual_fee"),
+                        row.get("estimated_fee"),
+                        row.get("actual_tax"),
+                        row.get("estimated_tax"),
+                        json.dumps(row.get("cost_profile") or {}, ensure_ascii=False),
+                        json.dumps(row.get("raw") or {}, ensure_ascii=False),
+                        now,
+                    )
+                    for row in rows
+                ],
+            )
+        return len(rows)
+
+    def executions(self, limit: int = 100) -> list[dict[str, Any]]:
+        safe_limit = max(1, min(int(limit), 500))
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT executions.*, asset_aliases.alias
+                FROM executions
+                LEFT JOIN asset_aliases
+                  ON asset_aliases.platform = executions.platform
+                 AND asset_aliases.symbol = executions.symbol
+                ORDER BY COALESCE(executions.executed_at, executions.ordered_at) DESC, executions.id DESC
+                LIMIT ?
+                """,
+                (safe_limit,),
+            ).fetchall()
+            return [self._execution_row(row) for row in rows]
+
+    @staticmethod
+    def _execution_row(row: sqlite3.Row) -> dict[str, Any]:
+        execution = dict(row)
+        try:
+            execution["cost_profile"] = json.loads(execution.pop("cost_profile_json") or "{}")
+        except json.JSONDecodeError:
+            execution["cost_profile"] = {}
+        execution.pop("raw_json", None)
+        execution["display_name"] = execution.get("alias") or execution["name"]
+        execution["fee"] = (
+            execution["actual_fee"]
+            if execution["actual_fee"] is not None
+            else execution["estimated_fee"]
+        )
+        execution["tax"] = (
+            execution["actual_tax"]
+            if execution["actual_tax"] is not None
+            else execution["estimated_tax"]
+        )
+        execution["fee_status"] = "actual" if execution["actual_fee"] is not None else "estimated"
+        execution["tax_status"] = "actual" if execution["actual_tax"] is not None else "estimated"
+        return execution
+
     def start_sync(self, platform: str) -> int:
         with self.connect() as conn:
             cursor = conn.execute(
@@ -248,16 +387,17 @@ class Repository:
         *,
         status: str,
         synced_count: int | None = None,
+        execution_count: int | None = None,
         error: str | None = None,
     ) -> dict[str, Any]:
         with self.connect() as conn:
             conn.execute(
                 """
                 UPDATE sync_runs
-                SET completed_at = ?, status = ?, synced_count = ?, error = ?
+                SET completed_at = ?, status = ?, synced_count = ?, execution_count = ?, error = ?
                 WHERE id = ?
                 """,
-                (utc_now(), status, synced_count, error, sync_id),
+                (utc_now(), status, synced_count, execution_count, error, sync_id),
             )
             row = conn.execute("SELECT * FROM sync_runs WHERE id = ?", (sync_id,)).fetchone()
             if not row:

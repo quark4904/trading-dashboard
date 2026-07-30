@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 import os
 import sqlite3
@@ -13,10 +15,13 @@ from unittest.mock import MagicMock, patch
 from app.config import api_key_expirations
 from app.fee_policies import FeePolicyStore
 from app.integrations.fx import FxError, usd_krw_rate
+from app.integrations.kis import KISClient
+from app.integrations.tossinvest import TossInvestClient
+from app.integrations.upbit import UpbitClient
 from app.order_costs import estimate_dca_buy_cost
 from app.repository import Repository
 from app.scheduler import KST, scheduled_slot
-from app.services import TradingService
+from app.services import TradingService, _normalize_upbit_execution
 from app.strategy_capabilities import compile_dca_buy_request, strategy_capabilities
 from app.validation import validate_strategy
 
@@ -52,12 +57,59 @@ class RepositoryTests(unittest.TestCase):
         repo = Repository(self.db_path)
         sync_id = repo.start_sync("upbit")
 
-        run = repo.finish_sync(sync_id, status="success", synced_count=3)
+        run = repo.finish_sync(sync_id, status="success", synced_count=3, execution_count=2)
 
         self.assertEqual(run["status"], "success")
         self.assertEqual(run["synced_count"], 3)
+        self.assertEqual(run["execution_count"], 2)
         self.assertEqual(repo.latest_sync_runs()[0]["platform"], "upbit")
         self.assertEqual(repo.recent_sync_runs()[0]["id"], sync_id)
+
+    def test_execution_upsert_is_idempotent_and_prefers_actual_fee(self) -> None:
+        repo = Repository(self.db_path)
+        row = {
+            "external_order_id": "order-1",
+            "ordered_at": "2026-07-30T09:00:00+09:00",
+            "executed_at": "2026-07-30T09:00:01+09:00",
+            "symbol": "005930",
+            "name": "삼성전자",
+            "side": "buy",
+            "order_type": "market",
+            "status": "filled",
+            "quantity": 1,
+            "average_price": 70000,
+            "amount": 70000,
+            "currency": "KRW",
+            "actual_fee": None,
+            "estimated_fee": 10.5,
+            "actual_tax": None,
+            "estimated_tax": 0,
+            "cost_profile": {"fee_source": {"kind": "official_policy", "label": "공식 요율"}},
+        }
+        repo.upsert_executions("toss", [row])
+        row.update(
+            {
+                "actual_fee": 10,
+                "estimated_fee": None,
+                "cost_profile": {"fee_source": {"kind": "actual_api", "label": "체결 이력"}},
+            }
+        )
+        repo.upsert_executions("toss", [row])
+        row.update(
+            {
+                "actual_fee": None,
+                "estimated_fee": 10.5,
+                "cost_profile": {"fee_source": {"kind": "official_policy", "label": "공식 요율"}},
+            }
+        )
+        repo.upsert_executions("toss", [row])
+
+        executions = repo.executions()
+
+        self.assertEqual(len(executions), 1)
+        self.assertEqual(executions[0]["fee"], 10)
+        self.assertEqual(executions[0]["fee_status"], "actual")
+        self.assertEqual(executions[0]["cost_profile"]["fee_source"]["kind"], "actual_api")
 
     def test_asset_alias_survives_holding_replacement(self) -> None:
         repo = Repository(self.db_path)
@@ -184,6 +236,97 @@ class ApiKeyExpirationTests(unittest.TestCase):
         self.assertEqual(results["toss"]["status"], "valid")
         self.assertEqual(results["kis_pension"]["status"], "warning")
         self.assertEqual(results["kis_isa"]["status"], "expired")
+
+
+class IntegrationClientTests(unittest.TestCase):
+    def test_toss_closed_orders_follows_cursor_pagination(self) -> None:
+        client = object.__new__(TossInvestClient)
+        client.account_seq = "account-1"
+        client._request = MagicMock(
+            side_effect=[
+                {
+                    "result": {
+                        "orders": [{"orderId": "1"}],
+                        "hasNext": True,
+                        "nextCursor": "next-page",
+                    }
+                },
+                {
+                    "result": {
+                        "orders": [{"orderId": "2"}],
+                        "hasNext": False,
+                        "nextCursor": None,
+                    }
+                },
+            ]
+        )
+
+        orders = client.closed_orders(from_date="2026-07-01", to_date="2026-07-30")
+
+        self.assertEqual([item["orderId"] for item in orders], ["1", "2"])
+        self.assertIn("cursor=next-page", client._request.call_args_list[1].args[1])
+
+    def test_kis_domestic_executions_follows_continuation_keys(self) -> None:
+        client = object.__new__(KISClient)
+        client.account = SimpleNamespace(
+            platform="kis_isa",
+            account_no="12345678",
+            product_code="01",
+        )
+        client.is_paper = False
+        client._request = MagicMock(
+            side_effect=[
+                {
+                    "rt_cd": "0",
+                    "output1": [{"odno": "1"}],
+                    "ctx_area_fk100": "fk",
+                    "ctx_area_nk100": "nk",
+                    "_response_headers": {"tr_cont": "M"},
+                },
+                {
+                    "rt_cd": "0",
+                    "output1": [{"odno": "2"}],
+                    "ctx_area_fk100": "",
+                    "ctx_area_nk100": "",
+                    "_response_headers": {"tr_cont": ""},
+                },
+            ]
+        )
+
+        rows = client.domestic_executions(start_date="20260701", end_date="20260730")
+
+        self.assertEqual([item["odno"] for item in rows], ["1", "2"])
+        second_call = client._request.call_args_list[1]
+        self.assertEqual(second_call.kwargs["params"]["CTX_AREA_FK100"], "fk")
+        self.assertEqual(second_call.kwargs["params"]["CTX_AREA_NK100"], "nk")
+        self.assertEqual(second_call.kwargs["tr_cont"], "N")
+
+    def test_upbit_hashes_the_unencoded_query_string(self) -> None:
+        client = object.__new__(UpbitClient)
+        client.access_key = "access"
+        client.secret_key = "secret"
+        response = MagicMock()
+        response.__enter__.return_value.read.return_value = b"[]"
+
+        with patch("app.integrations.upbit.urlopen", return_value=response) as request:
+            client.closed_orders(
+                start_time="2026-07-01T00:00:00Z",
+                end_time="2026-07-08T00:00:00Z",
+            )
+
+        sent_request = request.call_args.args[0]
+        query = sent_request.full_url.split("?", 1)[1]
+        token = sent_request.headers["Authorization"].split(" ", 1)[1]
+        payload_part = token.split(".")[1]
+        payload = json.loads(
+            base64.urlsafe_b64decode(payload_part + "=" * (-len(payload_part) % 4))
+        )
+
+        self.assertNotIn("%3A", query)
+        self.assertEqual(
+            payload["query_hash"],
+            hashlib.sha512(query.encode("utf-8")).hexdigest(),
+        )
 
 
 class ValidationTests(unittest.TestCase):
@@ -477,6 +620,111 @@ class FeePolicyTests(unittest.TestCase):
 
         self.assertEqual(first["fee_pct"], 0.07)
         self.assertEqual(second["fee_pct"], 0.08)
+
+
+class ExecutionNormalizationTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.repo = Repository(Path(self.temp_dir.name) / "dashboard.db")
+        self.service = TradingService(self.repo, upbit_fee_provider=lambda _: None)
+
+    def tearDown(self) -> None:
+        self.temp_dir.cleanup()
+
+    def test_toss_uses_actual_commission_and_tax(self) -> None:
+        execution = self.service._normalize_toss_execution(
+            {
+                "orderId": "toss-order",
+                "symbol": "005930",
+                "side": "BUY",
+                "orderType": "MARKET",
+                "status": "FILLED",
+                "currency": "KRW",
+                "orderedAt": "2026-03-28T09:30:00+09:00",
+                "execution": {
+                    "filledQuantity": "10",
+                    "averageFilledPrice": "70000",
+                    "filledAmount": "700000",
+                    "commission": "1400",
+                    "tax": "0",
+                    "filledAt": "2026-03-28T09:31:15+09:00",
+                },
+            }
+        )
+
+        self.assertEqual(execution["actual_fee"], 1400)
+        self.assertIsNone(execution["estimated_fee"])
+        self.assertEqual(execution["actual_tax"], 0)
+        self.assertEqual(execution["cost_profile"]["fee_source"]["kind"], "actual_api")
+
+    def test_toss_falls_back_to_official_policy_when_commission_is_missing(self) -> None:
+        execution = self.service._normalize_toss_execution(
+            {
+                "orderId": "toss-order",
+                "symbol": "005930",
+                "side": "BUY",
+                "orderType": "MARKET",
+                "status": "FILLED",
+                "currency": "KRW",
+                "orderedAt": "2026-03-28T09:30:00+09:00",
+                "execution": {
+                    "filledQuantity": "10",
+                    "averageFilledPrice": "70000",
+                    "filledAmount": "700000",
+                    "commission": None,
+                    "tax": None,
+                    "filledAt": "2026-03-28T09:31:15+09:00",
+                },
+            }
+        )
+
+        self.assertAlmostEqual(execution["estimated_fee"], 105)
+        self.assertEqual(execution["cost_profile"]["fee_source"]["kind"], "official_policy")
+
+    def test_upbit_uses_paid_fee(self) -> None:
+        execution = _normalize_upbit_execution(
+            {
+                "uuid": "upbit-order",
+                "market": "KRW-BTC",
+                "side": "bid",
+                "ord_type": "price",
+                "state": "done",
+                "created_at": "2026-07-30T09:00:00+09:00",
+                "executed_volume": "0.001",
+                "executed_funds": "100000",
+                "paid_fee": "50",
+            },
+            {"KRW-BTC": "비트코인"},
+            FeePolicyStore(),
+        )
+
+        self.assertEqual(execution["actual_fee"], 50)
+        self.assertIsNone(execution["estimated_fee"])
+        self.assertEqual(execution["cost_profile"]["fee_source"]["kind"], "actual_api")
+
+    def test_kis_marks_fee_as_official_policy_estimate(self) -> None:
+        execution = self.service._normalize_kis_execution(
+            "kis_isa",
+            {
+                "ord_dt": "20260730",
+                "ord_tmd": "093000",
+                "ord_gno_brno": "12345",
+                "odno": "000001",
+                "pdno": "005930",
+                "prdt_name": "삼성전자",
+                "sll_buy_dvsn_cd": "02",
+                "ord_dvsn_name": "시장가",
+                "tot_ccld_qty": "10",
+                "avg_prvs": "70000",
+                "tot_ccld_amt": "700000",
+                "rmn_qty": "0",
+            },
+            {"005930": "stock"},
+        )
+
+        self.assertIsNone(execution["actual_fee"])
+        self.assertAlmostEqual(execution["estimated_fee"], 98.3689)
+        self.assertEqual(execution["cost_profile"]["fee_source"]["kind"], "official_policy")
 
 
 class StrategyCapabilityTests(unittest.TestCase):

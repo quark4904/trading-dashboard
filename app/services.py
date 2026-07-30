@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from typing import Any, Callable
 
-from app.config import platform_configs
+from app.config import execution_history_days, platform_configs
 from app.fee_policies import FeePolicyStore
 from app.integrations.fx import usd_krw_rate
 from app.integrations.kis import KISClient, kis_accounts
@@ -207,10 +207,19 @@ class TradingService:
                 }
             )
 
+        start_date, end_date = _execution_history_range()
+        closed_orders = _upbit_closed_orders(client, start_date, end_date)
+        executions = [
+            _normalize_upbit_execution(item, market_names, self.fee_policy_store)
+            for item in _deduplicate_orders(closed_orders, "uuid")
+            if _to_float(item.get("executed_volume")) > 0
+        ]
         count = self.repo.replace_platform_holdings("upbit", rows)
+        execution_count = self.repo.upsert_executions("upbit", executions)
         return {
             "platform": "upbit",
             "synced_count": count,
+            "execution_count": execution_count,
             "holdings": rows,
         }
 
@@ -230,6 +239,11 @@ class TradingService:
     def _sync_kis_account(self, account) -> dict[str, Any]:
         client = KISClient(account)
         data = client.domestic_balance()
+        start_date, end_date = _execution_history_range()
+        raw_executions = client.domestic_executions(
+            start_date=start_date.strftime("%Y%m%d"),
+            end_date=end_date.strftime("%Y%m%d"),
+        )
         rows = []
         cash_amount = _kis_orderable_cash(data)
         if cash_amount > 0:
@@ -263,8 +277,20 @@ class TradingService:
                     "currency": "KRW",
                 }
             )
+        asset_types = {row["symbol"]: row["asset_type"] for row in rows}
+        executions = [
+            self._normalize_kis_execution(account.platform, item, asset_types)
+            for item in _deduplicate_orders(raw_executions, "odno", prefix_fields=("ord_dt", "ord_gno_brno"))
+            if _to_float(item.get("tot_ccld_qty")) > 0
+        ]
         count = self.repo.replace_platform_holdings(account.platform, rows)
-        return {"platform": account.platform, "synced_count": count, "holdings": rows}
+        execution_count = self.repo.upsert_executions(account.platform, executions)
+        return {
+            "platform": account.platform,
+            "synced_count": count,
+            "execution_count": execution_count,
+            "holdings": rows,
+        }
 
     def sync_toss_holdings(self) -> dict[str, Any]:
         return self._run_sync("toss", self._sync_toss_holdings)
@@ -272,6 +298,11 @@ class TradingService:
     def _sync_toss_holdings(self) -> dict[str, Any]:
         client = TossInvestClient()
         data = client.holdings()
+        start_date, end_date = _execution_history_range()
+        raw_executions = client.closed_orders(
+            from_date=start_date.isoformat(),
+            to_date=end_date.isoformat(),
+        )
         exchange_rate = usd_krw_rate(self.repo, client)
         fx_rate = float(exchange_rate["rate"])
         rows = []
@@ -307,10 +338,17 @@ class TradingService:
                     "currency": "KRW",
                 }
             )
+        executions = [
+            self._normalize_toss_execution(item)
+            for item in _deduplicate_orders(raw_executions, "orderId")
+            if _to_float((item.get("execution") or {}).get("filledQuantity")) > 0
+        ]
         count = self.repo.replace_platform_holdings("toss", rows)
+        execution_count = self.repo.upsert_executions("toss", executions)
         return {
             "platform": "toss",
             "synced_count": count,
+            "execution_count": execution_count,
             "fx_usd_krw": fx_rate,
             "exchange_rate": exchange_rate,
             "holdings": rows,
@@ -436,6 +474,106 @@ class TradingService:
         price = float(quote["current_price"])
         return quote if price > 0 else None
 
+    def _normalize_toss_execution(self, item: dict[str, Any]) -> dict[str, Any]:
+        execution = item.get("execution") or {}
+        amount = _to_float(execution.get("filledAmount"))
+        quantity = _to_float(execution.get("filledQuantity"))
+        average_price = _to_float(execution.get("averageFilledPrice"))
+        if average_price <= 0 and quantity:
+            average_price = amount / quantity
+        currency = str(item.get("currency") or "KRW")
+        market = "overseas" if currency == "USD" else "domestic"
+        profile = self.fee_policy_store.resolve_cost_profile(
+            "toss",
+            {"market": market},
+            notional=amount,
+        )
+        actual_fee = _optional_float(execution.get("commission"))
+        actual_tax = _optional_float(execution.get("tax"))
+        estimated_fee = None if actual_fee is not None else amount * profile["fee_pct"] / 100
+        estimated_tax = None if actual_tax is not None else amount * profile["tax_pct"] / 100
+        if actual_fee is not None:
+            profile["fee_pct"] = actual_fee / amount * 100 if amount else 0
+            profile["fee_source"] = {
+                "kind": "actual_api",
+                "label": "토스증권 체결 이력 수수료",
+                "field": "execution.commission",
+            }
+        if actual_tax is not None:
+            profile["tax_source"] = {
+                "kind": "actual_api",
+                "label": "토스증권 체결 이력 세금",
+                "field": "execution.tax",
+            }
+        return {
+            "external_order_id": str(item["orderId"]),
+            "ordered_at": str(item.get("orderedAt") or execution.get("filledAt")),
+            "executed_at": execution.get("filledAt"),
+            "symbol": str(item.get("symbol") or "UNKNOWN"),
+            "name": str(item.get("name") or item.get("symbol") or "UNKNOWN"),
+            "side": str(item.get("side") or "").lower(),
+            "order_type": str(item.get("orderType") or "unknown").lower(),
+            "status": str(item.get("status") or "filled").lower(),
+            "quantity": quantity,
+            "average_price": average_price,
+            "amount": amount,
+            "currency": currency,
+            "actual_fee": actual_fee,
+            "estimated_fee": estimated_fee,
+            "actual_tax": actual_tax,
+            "estimated_tax": estimated_tax,
+            "cost_profile": profile,
+            "raw": item,
+        }
+
+    def _normalize_kis_execution(
+        self,
+        platform: str,
+        item: dict[str, Any],
+        asset_types: dict[str, str],
+    ) -> dict[str, Any]:
+        quantity = _to_float(item.get("tot_ccld_qty"))
+        amount = _to_float(item.get("tot_ccld_amt"))
+        average_price = _to_float(item.get("avg_prvs"))
+        if average_price <= 0 and quantity:
+            average_price = amount / quantity
+        symbol = str(item.get("pdno") or "UNKNOWN")
+        profile = self.fee_policy_store.resolve_cost_profile(
+            platform,
+            {"market": "domestic"},
+            notional=amount,
+            asset_type=asset_types.get(symbol),
+        )
+        side = "buy" if str(item.get("sll_buy_dvsn_cd")) == "02" else "sell"
+        order_id = ":".join(
+            [
+                str(item.get("ord_dt") or ""),
+                str(item.get("ord_gno_brno") or ""),
+                str(item.get("odno") or ""),
+            ]
+        )
+        remaining = _to_float(item.get("rmn_qty"))
+        return {
+            "external_order_id": order_id,
+            "ordered_at": _kis_ordered_at(item),
+            "executed_at": None,
+            "symbol": symbol,
+            "name": str(item.get("prdt_name") or symbol),
+            "side": side,
+            "order_type": str(item.get("ord_dvsn_name") or "unknown"),
+            "status": "partial_filled" if remaining > 0 else "filled",
+            "quantity": quantity,
+            "average_price": average_price,
+            "amount": amount,
+            "currency": "KRW",
+            "actual_fee": None,
+            "estimated_fee": amount * profile["fee_pct"] / 100,
+            "actual_tax": None,
+            "estimated_tax": amount * profile["tax_pct"] / 100 if side == "buy" else None,
+            "cost_profile": profile,
+            "raw": item,
+        }
+
     @staticmethod
     def _fetch_upbit_fee(market: str) -> dict[str, Any]:
         try:
@@ -465,7 +603,13 @@ class TradingService:
             }
 
         count = int(result.get("synced_count", 0))
-        run = self.repo.finish_sync(sync_id, status="success", synced_count=count)
+        execution_count = int(result.get("execution_count", 0))
+        run = self.repo.finish_sync(
+            sync_id,
+            status="success",
+            synced_count=count,
+            execution_count=execution_count,
+        )
         return {
             **result,
             "ok": True,
@@ -491,6 +635,109 @@ def _to_float(value: Any) -> float:
         return float(value or 0)
     except (TypeError, ValueError):
         return 0.0
+
+
+def _optional_float(value: Any) -> float | None:
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _execution_history_range() -> tuple[date, date]:
+    end_date = datetime.now(KST).date()
+    return end_date - timedelta(days=execution_history_days() - 1), end_date
+
+
+def _upbit_closed_orders(
+    client: UpbitClient,
+    start_date: date,
+    end_date: date,
+) -> list[dict[str, Any]]:
+    start = datetime.combine(start_date, time.min, tzinfo=KST)
+    end = datetime.combine(end_date + timedelta(days=1), time.min, tzinfo=KST)
+    orders: list[dict[str, Any]] = []
+    while start < end:
+        window_end = min(start + timedelta(days=7), end)
+        orders.extend(
+            client.closed_orders(
+                start_time=start.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+                end_time=window_end.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+            )
+        )
+        start = window_end
+    return orders
+
+
+def _deduplicate_orders(
+    rows: list[dict[str, Any]],
+    id_field: str,
+    *,
+    prefix_fields: tuple[str, ...] = (),
+) -> list[dict[str, Any]]:
+    deduplicated: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        key = ":".join(str(row.get(field) or "") for field in (*prefix_fields, id_field))
+        if key.strip(":"):
+            deduplicated[key] = row
+    return list(deduplicated.values())
+
+
+def _normalize_upbit_execution(
+    item: dict[str, Any],
+    market_names: dict[str, str],
+    fee_policy_store: FeePolicyStore,
+) -> dict[str, Any]:
+    amount = _to_float(item.get("executed_funds"))
+    quantity = _to_float(item.get("executed_volume"))
+    average_price = amount / quantity if quantity else 0
+    actual_fee = _optional_float(item.get("paid_fee"))
+    market = str(item.get("market") or "UNKNOWN")
+    quote_currency = market.split("-", 1)[0] if "-" in market else "KRW"
+    profile = fee_policy_store.resolve_cost_profile(
+        "upbit",
+        {"market": "crypto"},
+        notional=amount,
+    )
+    estimated_fee = amount * profile["fee_pct"] / 100 if actual_fee is None else None
+    if actual_fee is not None:
+        profile["fee_pct"] = actual_fee / amount * 100 if amount else 0
+        profile["fee_source"] = {
+            "kind": "actual_api",
+            "label": "업비트 종료 주문 사용 수수료",
+            "field": "paid_fee",
+        }
+    return {
+        "external_order_id": str(item["uuid"]),
+        "ordered_at": str(item.get("created_at") or datetime.now(timezone.utc).isoformat()),
+        "executed_at": None,
+        "symbol": market,
+        "name": market_names.get(market, market),
+        "side": "buy" if item.get("side") == "bid" else "sell",
+        "order_type": str(item.get("ord_type") or "unknown"),
+        "status": str(item.get("state") or "done"),
+        "quantity": quantity,
+        "average_price": average_price,
+        "amount": amount,
+        "currency": quote_currency,
+        "actual_fee": actual_fee,
+        "estimated_fee": estimated_fee,
+        "actual_tax": None,
+        "estimated_tax": 0,
+        "cost_profile": profile,
+        "raw": item,
+    }
+
+
+def _kis_ordered_at(item: dict[str, Any]) -> str:
+    raw_date = str(item.get("ord_dt") or "")
+    raw_time = str(item.get("ord_tmd") or "").zfill(6)
+    try:
+        return datetime.strptime(f"{raw_date}{raw_time}", "%Y%m%d%H%M%S").replace(tzinfo=KST).isoformat()
+    except ValueError:
+        return datetime.now(timezone.utc).isoformat()
 
 
 def _kis_orderable_cash(data: dict[str, Any]) -> float:

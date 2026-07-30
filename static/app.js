@@ -350,6 +350,41 @@ async function renderOrders() {
   );
 }
 
+async function renderExecutions() {
+  const executions = await api("/api/executions");
+  document.querySelector("#executionsTable").innerHTML = table(
+    ["체결 시간", "플랫폼", "종목", "구분", "수량", "평균 체결가", "체결 금액", "수수료", "세금", "상태"],
+    executions.length
+      ? executions.map(
+          (item) => `
+        <tr>
+          <td>${new Date(item.executed_at || item.ordered_at).toLocaleString("ko-KR")}</td>
+          <td>${escapeHtml(platformLabel(item.platform))}</td>
+          <td>${escapeHtml(item.display_name || item.symbol)}<br /><span class="muted">${escapeHtml(item.symbol)}</span></td>
+          <td>${item.side === "buy" ? "매수" : "매도"}</td>
+          <td>${number.format(item.quantity)}</td>
+          <td>${formatCurrencyAmount(item.average_price, item.currency)}</td>
+          <td>${formatCurrencyAmount(item.amount, item.currency)}</td>
+          <td>${formatExecutionCost(item.fee, item.currency, item.fee_status, item.cost_profile?.fee_source?.label)}</td>
+          <td>${formatExecutionCost(item.tax, item.currency, item.tax_status, item.cost_profile?.tax_source?.label)}</td>
+          <td>${escapeHtml(item.status)}</td>
+        </tr>
+      `,
+        )
+      : [`<tr><td colspan="10">아직 동기화된 실제 체결 이력이 없습니다.</td></tr>`],
+  );
+}
+
+function formatExecutionCost(value, currency, status, source) {
+  if (value == null) return "확인 불가";
+  const label = status === "actual" ? "실제" : "추정";
+  return `
+    <div class="order-cost-breakdown">
+      <strong>${formatCurrencyAmount(value, currency)}</strong>
+      <span>${escapeHtml(label)}${source ? ` · ${escapeHtml(source)}` : ""}</span>
+    </div>`;
+}
+
 function formatOrderAmount(item) {
   if (item.amount == null) return "-";
   return formatCurrencyAmount(item.amount, item.currency);
@@ -543,7 +578,7 @@ async function refresh({ forcePortfolio = false } = {}) {
     api("/api/strategy-capabilities"),
   ]);
   state.strategyCapabilities = strategyCapabilities;
-  await Promise.all([renderOrders(), renderStrategyRuns(), renderStrategies()]);
+  await Promise.all([renderExecutions(), renderOrders(), renderStrategyRuns(), renderStrategies()]);
 }
 
 function refreshVisiblePortfolio() {
@@ -701,8 +736,8 @@ document.querySelector("#smallAssetsToggle").addEventListener("click", () => {
 
 async function syncHoldings(path, label) {
   const message = document.querySelector("#syncMessage");
-  message.textContent = `${label} 잔고를 동기화하는 중입니다.`;
-  document.querySelector("#syncDialogSummary").textContent = `${label} 잔고를 동기화하는 중입니다.`;
+  message.textContent = `${label} 잔고와 체결 이력을 동기화하는 중입니다.`;
+  document.querySelector("#syncDialogSummary").textContent = `${label} 잔고와 체결 이력을 동기화하는 중입니다.`;
   setSyncButtonsDisabled(true);
   try {
     const result = await api(path, { method: "POST" });
@@ -823,7 +858,7 @@ function renderSyncDialog(syncStatus) {
                 <strong>${escapeHtml(platformLabel(item.platform))}</strong>
                 <span class="sync-result ${escapeHtml(item.status)}">${escapeHtml(syncStatusLabel(item.status))}</span>
               </div>
-              <p>${item.synced_count == null ? "동기화 수량 없음" : `${number.format(item.synced_count)}개 자산`}</p>
+              <p>${syncCountLabel(item)}</p>
               <p>${escapeHtml(syncRunTime(item))}</p>
               ${item.error ? `<p>${escapeHtml(item.error)}</p>` : ""}
             </article>
@@ -841,13 +876,19 @@ function renderSyncDialog(syncStatus) {
                 <strong>${escapeHtml(platformLabel(item.platform))}</strong>
                 <span class="sync-result ${escapeHtml(item.status)}">${escapeHtml(syncStatusLabel(item.status))}</span>
               </div>
-              <p>${escapeHtml(syncRunTime(item))}${item.synced_count == null ? "" : ` · ${number.format(item.synced_count)}개 자산`}</p>
+              <p>${escapeHtml(syncRunTime(item))}${item.synced_count == null ? "" : ` · ${syncCountLabel(item)}`}</p>
               ${item.error ? `<p>${escapeHtml(item.error)}</p>` : ""}
             </article>
           `,
         )
         .join("")
     : `<div class="sync-empty">최근 실행 이력이 없습니다.</div>`;
+}
+
+function syncCountLabel(item) {
+  if (item.synced_count == null) return "동기화 수량 없음";
+  const executions = item.execution_count == null ? "" : ` · 체결 ${number.format(item.execution_count)}건`;
+  return `자산 ${number.format(item.synced_count)}개${executions}`;
 }
 
 function apiKeyStatusText(item) {

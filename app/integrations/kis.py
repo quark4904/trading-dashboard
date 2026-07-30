@@ -53,6 +53,52 @@ class KISClient:
         tr_id = "VTTC8434R" if self.is_paper else "TTTC8434R"
         return self._request("GET", "/uapi/domestic-stock/v1/trading/inquire-balance", params=params, tr_id=tr_id)
 
+    def domestic_executions(self, *, start_date: str, end_date: str) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        fk100 = ""
+        nk100 = ""
+        tr_cont = ""
+        tr_id = "VTTC0081R" if self.is_paper else "TTTC0081R"
+        for _ in range(10):
+            params = {
+                "CANO": self.account.account_no,
+                "ACNT_PRDT_CD": self.account.product_code,
+                "INQR_STRT_DT": start_date,
+                "INQR_END_DT": end_date,
+                "SLL_BUY_DVSN_CD": "00",
+                "PDNO": "",
+                "CCLD_DVSN": "01",
+                "INQR_DVSN": "00",
+                "INQR_DVSN_3": "00",
+                "ORD_GNO_BRNO": "",
+                "ODNO": "",
+                "INQR_DVSN_1": "",
+                "CTX_AREA_FK100": fk100,
+                "CTX_AREA_NK100": nk100,
+                "EXCG_ID_DVSN_CD": "ALL",
+            }
+            data = self._request(
+                "GET",
+                "/uapi/domestic-stock/v1/trading/inquire-daily-ccld",
+                params=params,
+                tr_id=tr_id,
+                tr_cont=tr_cont,
+                include_response_headers=True,
+            )
+            if str(data.get("rt_cd") or "0") != "0":
+                raise KISError(
+                    f"{self.account.platform} 체결 이력 조회 실패: "
+                    f"{data.get('msg1') or data.get('msg_cd') or data}"
+                )
+            rows.extend(data.get("output1") or [])
+            headers = data.pop("_response_headers", {})
+            next_fk100 = str(data.get("ctx_area_fk100") or "")
+            next_nk100 = str(data.get("ctx_area_nk100") or "")
+            if headers.get("tr_cont") not in {"M", "F"} or (next_fk100, next_nk100) == (fk100, nk100):
+                break
+            fk100, nk100, tr_cont = next_fk100, next_nk100, "N"
+        return rows
+
     def _token(self) -> str:
         cache_key = self.account.app_key
         cached = _TOKEN_CACHE.get(cache_key)
@@ -79,7 +125,16 @@ class KISClient:
         _TOKEN_CACHE[cache_key] = {"access_token": token, "expires_at": time.time() + expires_in}
         return token
 
-    def _request(self, method: str, path: str, *, params: dict[str, str] | None = None, tr_id: str) -> dict[str, Any]:
+    def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: dict[str, str] | None = None,
+        tr_id: str,
+        tr_cont: str = "",
+        include_response_headers: bool = False,
+    ) -> dict[str, Any]:
         token = self._token()
         query = urlencode(params or {})
         url = f"{self.base_url}{path}"
@@ -96,7 +151,9 @@ class KISClient:
                 "appkey": self.account.app_key,
                 "appsecret": self.account.app_secret,
                 "tr_id": tr_id,
+                "tr_cont": tr_cont,
             },
+            include_response_headers=include_response_headers,
         )
 
     def _request_raw(
@@ -107,10 +164,16 @@ class KISClient:
         body: bytes | None = None,
         headers: dict[str, str] | None = None,
         url: str | None = None,
+        include_response_headers: bool = False,
     ) -> dict[str, Any]:
         try:
             with urlopen(Request(url or f"{self.base_url}{path}", data=body, headers=headers or {}, method=method), timeout=12) as response:
-                return json.loads(response.read().decode("utf-8"))
+                data = json.loads(response.read().decode("utf-8"))
+                if include_response_headers:
+                    data["_response_headers"] = {
+                        key.lower(): value for key, value in response.headers.items()
+                    }
+                return data
         except HTTPError as exc:
             body_text = exc.read().decode("utf-8", errors="replace")
             raise KISError(f"{self.account.platform} KIS API {exc.code}: {body_text}") from exc

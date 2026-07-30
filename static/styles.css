@@ -473,6 +473,11 @@ tr:last-child td {
   border-bottom: 0;
 }
 
+.muted {
+  color: var(--muted);
+  font-size: 12px;
+}
+
 .status-list {
   display: grid;
   gap: 10px;

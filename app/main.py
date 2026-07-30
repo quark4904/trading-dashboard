@@ -53,6 +53,8 @@ class Handler(BaseHTTPRequestHandler):
             )
         if parsed.path == "/api/orders":
             return self.json_response(repo.orders())
+        if parsed.path == "/api/executions":
+            return self.json_response(repo.executions())
         if parsed.path == "/api/strategy-runs":
             return self.json_response(repo.strategy_runs())
         if parsed.path == "/api/strategies":
