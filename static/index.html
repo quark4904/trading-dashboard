@@ -84,6 +84,15 @@
             </div>
             <div id="dcaItemRows" class="dca-item-rows"></div>
           </div>
+          <fieldset class="dca-cost-editor" data-dca-field>
+            <legend>DRY_RUN 거래 비용 가정</legend>
+            <div class="dca-cost-fields">
+              <label>수수료 %<input name="fee_pct" type="number" min="0" max="100" step="0.001" value="0" /></label>
+              <label>세금 %<input name="tax_pct" type="number" min="0" max="100" step="0.001" value="0" /></label>
+              <label>슬리피지 %<input name="slippage_pct" type="number" min="0" max="100" step="0.001" value="0" /></label>
+            </div>
+            <p>증권사 공식 요율이 아닌 사용자 가정입니다. 수량 주문은 동기화된 현재가가 있을 때만 금액을 추정합니다.</p>
+          </fieldset>
           <label data-dca-field>실행 주기<select name="interval"><option value="daily">매일</option><option value="weekly">매주</option><option value="monthly">매월</option></select></label>
           <label id="executionDayField" class="hidden" data-dca-field><span id="executionDayLabel">실행 요일</span><select name="execution_day"></select></label>
           <label data-dca-field>실행 시간 (KST)<input name="execution_time" type="time" value="23:30" required /></label>

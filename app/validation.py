@@ -4,6 +4,7 @@ import math
 import re
 
 from app.config import platform_configs
+from app.order_costs import normalize_cost_assumptions
 from app.strategy_capabilities import dca_market_capability
 
 
@@ -89,6 +90,7 @@ def validate_strategy(data: dict) -> dict:
             "items": items,
             "interval": interval,
             "execution_time": execution_time,
+            "cost_assumptions": normalize_cost_assumptions(params.get("cost_assumptions")),
         }
         if interval in {"weekly", "monthly"}:
             params["execution_day"] = execution_day

@@ -59,6 +59,12 @@ class Repository:
                     amount REAL,
                     currency TEXT NOT NULL DEFAULT 'KRW',
                     limit_price REAL,
+                    reference_price REAL,
+                    estimated_notional REAL,
+                    estimated_fee REAL,
+                    estimated_tax REAL,
+                    estimated_slippage REAL,
+                    estimated_total REAL,
                     dry_run INTEGER NOT NULL,
                     status TEXT NOT NULL,
                     reason TEXT NOT NULL,
@@ -132,6 +138,16 @@ class Repository:
                 conn.execute("ALTER TABLE orders ADD COLUMN strategy_run_id INTEGER")
             if "currency" not in order_columns:
                 conn.execute("ALTER TABLE orders ADD COLUMN currency TEXT NOT NULL DEFAULT 'KRW'")
+            for column in (
+                "reference_price",
+                "estimated_notional",
+                "estimated_fee",
+                "estimated_tax",
+                "estimated_slippage",
+                "estimated_total",
+            ):
+                if column not in order_columns:
+                    conn.execute(f"ALTER TABLE orders ADD COLUMN {column} REAL")
             count = conn.execute("SELECT COUNT(*) FROM holdings").fetchone()[0]
             if count == 0 and env_flag("TRADING_DASHBOARD_SEED_DEMO"):
                 self._seed(conn)
@@ -374,6 +390,20 @@ class Repository:
         with self.connect() as conn:
             return [dict(row) for row in conn.execute("SELECT * FROM orders ORDER BY id DESC LIMIT 100")]
 
+    def holding_quote(self, platform: str, symbol: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT current_price, currency, updated_at
+                FROM holdings
+                WHERE platform = ? AND symbol = ?
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (platform, symbol),
+            ).fetchone()
+            return dict(row) if row else None
+
     def create_order(
         self,
         request: dict[str, Any],
@@ -387,8 +417,10 @@ class Repository:
             cursor = conn.execute(
                 """
                 INSERT INTO orders
-                (strategy_run_id, created_at, platform, symbol, side, order_type, quantity, amount, currency, limit_price, dry_run, status, reason, request_json)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (strategy_run_id, created_at, platform, symbol, side, order_type, quantity, amount, currency, limit_price,
+                 reference_price, estimated_notional, estimated_fee, estimated_tax, estimated_slippage, estimated_total,
+                 dry_run, status, reason, request_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     strategy_run_id,
@@ -401,6 +433,12 @@ class Repository:
                     request.get("amount"),
                     request.get("currency", "KRW"),
                     request.get("limit_price"),
+                    request.get("reference_price"),
+                    request.get("estimated_notional"),
+                    request.get("estimated_fee"),
+                    request.get("estimated_tax"),
+                    request.get("estimated_slippage"),
+                    request.get("estimated_total"),
                     1 if request.get("dry_run", True) else 0,
                     status,
                     reason,

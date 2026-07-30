@@ -9,6 +9,7 @@ from app.integrations.fx import usd_krw_rate
 from app.integrations.kis import KISClient, kis_accounts
 from app.integrations.tossinvest import TossInvestClient
 from app.integrations.upbit import UpbitClient
+from app.order_costs import estimate_dca_buy_cost, normalize_cost_assumptions
 from app.repository import Repository
 from app.scheduler import KST, scheduled_slot
 from app.strategy_capabilities import compile_dca_buy_request
@@ -351,8 +352,16 @@ class TradingService:
             items = strategy.get("params", {}).get("items") or []
             if not items:
                 raise ValueError("DCA 주문 항목이 없습니다.")
+            cost_assumptions = normalize_cost_assumptions(
+                strategy.get("params", {}).get("cost_assumptions")
+            )
             for item in items:
                 compiled = compile_dca_buy_request(strategy["platform"], item)
+                cost_estimate = estimate_dca_buy_cost(
+                    item,
+                    cost_assumptions,
+                    reference_price=self._dca_reference_price(strategy["platform"], item),
+                )
                 request = {
                     "platform": strategy["platform"],
                     "symbol": item["symbol"],
@@ -363,6 +372,8 @@ class TradingService:
                     "currency": item.get("currency", "KRW"),
                     "dry_run": True,
                     "compiled_request": compiled,
+                    "cost_assumptions": cost_assumptions,
+                    **cost_estimate,
                 }
                 self.repo.create_order(
                     request,
@@ -373,6 +384,15 @@ class TradingService:
             return self.repo.finish_strategy_run(run["id"], status="success", order_count=len(items))
         except Exception as exc:
             return self.repo.finish_strategy_run(run["id"], status="failed", error=str(exc))
+
+    def _dca_reference_price(self, platform: str, item: dict[str, Any]) -> float | None:
+        if item.get("order_type") != "quantity":
+            return None
+        quote = self.repo.holding_quote(platform, item["symbol"])
+        if not quote or quote["currency"] != item.get("currency", "KRW"):
+            return None
+        price = float(quote["current_price"])
+        return price if price > 0 else None
 
     def _run_sync(self, platform: str, sync: Callable[[], dict[str, Any]]) -> dict[str, Any]:
         sync_id = self.repo.start_sync(platform)

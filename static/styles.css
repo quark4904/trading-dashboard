@@ -681,6 +681,47 @@ tr:last-child td {
   background: #f8fafc;
 }
 
+.dca-cost-editor {
+  grid-column: 1 / -1;
+  min-width: 0;
+  margin: 0;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #f8fafc;
+}
+
+.dca-cost-editor legend {
+  padding: 0 4px;
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.dca-cost-fields {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.dca-cost-editor p {
+  margin: 10px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.order-cost-breakdown {
+  display: grid;
+  gap: 2px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.order-cost-breakdown strong {
+  color: var(--ink);
+  font-size: 13px;
+}
+
 .dca-items-header,
 .dca-item-row {
   display: flex;
@@ -1115,6 +1156,7 @@ select {
   .split,
   .filters,
   .form-grid,
+  .dca-cost-fields,
   .sync-platform-grid,
   .sync-dialog-actions,
   .api-key-grid {

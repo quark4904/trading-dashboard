@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import sqlite3
 import tempfile
 import unittest
 from datetime import date, datetime
@@ -10,6 +11,7 @@ from unittest.mock import MagicMock, patch
 
 from app.config import api_key_expirations
 from app.integrations.fx import FxError, usd_krw_rate
+from app.order_costs import estimate_dca_buy_cost
 from app.repository import Repository
 from app.scheduler import KST, scheduled_slot
 from app.services import TradingService
@@ -124,6 +126,45 @@ class RepositoryTests(unittest.TestCase):
         self.assertEqual(updated["name"], "수정 후")
         self.assertTrue(updated["enabled"])
 
+    def test_existing_orders_table_gets_cost_estimate_columns(self) -> None:
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                """
+                CREATE TABLE orders (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    strategy_run_id INTEGER,
+                    created_at TEXT NOT NULL,
+                    platform TEXT NOT NULL,
+                    symbol TEXT NOT NULL,
+                    side TEXT NOT NULL,
+                    order_type TEXT NOT NULL,
+                    quantity REAL,
+                    amount REAL,
+                    currency TEXT NOT NULL DEFAULT 'KRW',
+                    limit_price REAL,
+                    dry_run INTEGER NOT NULL,
+                    status TEXT NOT NULL,
+                    reason TEXT NOT NULL,
+                    request_json TEXT NOT NULL
+                )
+                """
+            )
+
+        repo = Repository(self.db_path)
+
+        with repo.connect() as conn:
+            columns = {row["name"] for row in conn.execute("PRAGMA table_info(orders)")}
+        self.assertTrue(
+            {
+                "reference_price",
+                "estimated_notional",
+                "estimated_fee",
+                "estimated_tax",
+                "estimated_slippage",
+                "estimated_total",
+            }.issubset(columns)
+        )
+
 
 class ApiKeyExpirationTests(unittest.TestCase):
     def test_expiration_statuses(self) -> None:
@@ -190,6 +231,7 @@ class ValidationTests(unittest.TestCase):
                 ],
                 "interval": "daily",
                 "execution_time": "22:30",
+                "cost_assumptions": {"fee_pct": 0.0, "tax_pct": 0.0, "slippage_pct": 0.0},
             },
         )
 
@@ -285,6 +327,82 @@ class ValidationTests(unittest.TestCase):
             result["params"]["items"],
             [{"symbol": "KRW-BTC", "market": "crypto", "order_type": "amount", "currency": "KRW", "amount": 5000}],
         )
+
+    def test_dca_normalizes_and_validates_cost_assumptions(self) -> None:
+        result = validate_strategy(
+            {
+                "name": "비용 반영 DCA",
+                "strategy_type": "dca",
+                "platform": "upbit",
+                "params": {
+                    "items": [{"symbol": "KRW-BTC", "value": 5000}],
+                    "cost_assumptions": {
+                        "fee_pct": "0.05",
+                        "tax_pct": 0,
+                        "slippage_pct": "0.1",
+                    },
+                },
+            }
+        )
+
+        self.assertEqual(
+            result["params"]["cost_assumptions"],
+            {"fee_pct": 0.05, "tax_pct": 0.0, "slippage_pct": 0.1},
+        )
+        for invalid_rate in (-0.1, 100.1, "nan", "invalid"):
+            with self.subTest(invalid_rate=invalid_rate), self.assertRaisesRegex(ValueError, "거래 비용률"):
+                validate_strategy(
+                    {
+                        "name": "잘못된 비용률",
+                        "strategy_type": "dca",
+                        "platform": "upbit",
+                        "params": {
+                            "items": [{"symbol": "KRW-BTC", "value": 5000}],
+                            "cost_assumptions": {"fee_pct": invalid_rate},
+                        },
+                    }
+                )
+        with self.assertRaisesRegex(ValueError, "객체 형식"):
+            validate_strategy(
+                {
+                    "name": "잘못된 비용률 형식",
+                    "strategy_type": "dca",
+                    "platform": "upbit",
+                    "params": {
+                        "items": [{"symbol": "KRW-BTC", "value": 5000}],
+                        "cost_assumptions": [],
+                    },
+                }
+            )
+
+
+class OrderCostTests(unittest.TestCase):
+    def test_estimates_amount_order_cost(self) -> None:
+        estimate = estimate_dca_buy_cost(
+            {"order_type": "amount", "amount": 5000},
+            {"fee_pct": 0.05, "tax_pct": 0, "slippage_pct": 0.1},
+        )
+
+        self.assertEqual(estimate["estimated_notional"], 5000)
+        self.assertEqual(estimate["estimated_fee"], 2.5)
+        self.assertEqual(estimate["estimated_tax"], 0)
+        self.assertEqual(estimate["estimated_slippage"], 5)
+        self.assertEqual(estimate["estimated_total"], 5007.5)
+
+    def test_quantity_order_requires_reference_price(self) -> None:
+        missing = estimate_dca_buy_cost(
+            {"order_type": "quantity", "quantity": 2},
+            {"fee_pct": 0.1},
+        )
+        estimated = estimate_dca_buy_cost(
+            {"order_type": "quantity", "quantity": 2},
+            {"fee_pct": 0.1},
+            reference_price=10_000,
+        )
+
+        self.assertIsNone(missing["estimated_total"])
+        self.assertEqual(estimated["estimated_notional"], 20_000)
+        self.assertEqual(estimated["estimated_total"], 20_020)
 
 
 class StrategyCapabilityTests(unittest.TestCase):
@@ -387,6 +505,11 @@ class StrategyRunTests(unittest.TestCase):
                         "items": [{"symbol": "KRW-BTC", "value": 5000}],
                         "interval": "daily",
                         "execution_time": "09:30",
+                        "cost_assumptions": {
+                            "fee_pct": 0.05,
+                            "tax_pct": 0,
+                            "slippage_pct": 0.1,
+                        },
                     },
                 }
             )
@@ -405,6 +528,46 @@ class StrategyRunTests(unittest.TestCase):
         self.assertEqual(history[0]["trigger"], "manual")
         self.assertEqual(history[0]["orders"][0]["status"], "dry_run")
         self.assertEqual(history[0]["orders"][0]["amount"], 5000)
+        self.assertEqual(history[0]["orders"][0]["estimated_fee"], 2.5)
+        self.assertEqual(history[0]["orders"][0]["estimated_slippage"], 5)
+        self.assertEqual(history[0]["orders"][0]["estimated_total"], 5007.5)
+
+    def test_quantity_order_uses_latest_holding_price_for_cost_estimate(self) -> None:
+        self.repo.replace_platform_holdings(
+            "kis_isa",
+            [
+                {
+                    "symbol": "458730",
+                    "name": "KODEX 미국S&P500",
+                    "asset_type": "etf",
+                    "quantity": 1,
+                    "avg_price": 10_000,
+                    "current_price": 12_000,
+                    "currency": "KRW",
+                }
+            ],
+        )
+        strategy = self.repo.create_strategy(
+            validate_strategy(
+                {
+                    "name": "국내 ETF DCA",
+                    "strategy_type": "dca",
+                    "platform": "kis_isa",
+                    "params": {
+                        "items": [{"symbol": "458730", "value": 2}],
+                        "cost_assumptions": {"fee_pct": 0.1},
+                    },
+                }
+            )
+        )
+
+        self.service.run_dca_strategy_now(strategy["id"])
+
+        order = self.repo.orders()[0]
+        self.assertEqual(order["reference_price"], 12_000)
+        self.assertEqual(order["estimated_notional"], 24_000)
+        self.assertEqual(order["estimated_fee"], 24)
+        self.assertEqual(order["estimated_total"], 24_024)
 
     def test_due_run_executes_once_per_scheduled_minute(self) -> None:
         now = datetime(2026, 7, 12, 9, 30, tzinfo=KST)
