@@ -14,7 +14,7 @@ WEEKDAYS = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", 
 
 
 def scheduled_slot(strategy: dict, now: datetime) -> str | None:
-    """Return the KST minute key when a DCA strategy is due, otherwise None."""
+    """Return the strategy-scoped KST minute key when a DCA strategy is due."""
     if not strategy.get("enabled") or strategy.get("strategy_type") != "dca":
         return None
 
@@ -43,7 +43,9 @@ def scheduled_slot(strategy: dict, now: datetime) -> str | None:
     elif interval != "daily":
         return None
 
-    return now_kst.replace(second=0, microsecond=0).isoformat()
+    slot = now_kst.replace(second=0, microsecond=0).isoformat()
+    strategy_id = strategy.get("id")
+    return f"{strategy_id}:{slot}" if strategy_id is not None else slot
 
 
 class StrategyScheduler:

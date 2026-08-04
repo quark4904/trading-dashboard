@@ -463,7 +463,7 @@ function strategyCard(item) {
     ? dcaItems(item, item.platform).map((entry) => `${entry.symbol} ${dcaItemValueLabel(entry)}`).join(" · ")
     : item.symbol || "전체 자산";
   const schedule = item.strategy_type === "dca"
-    ? scheduleLabel(item.params)
+    ? `${scheduleLabel(item.params)} · ${item.budget > 0 ? `일일 ${won.format(item.budget)}` : "예산 제한 없음"} · 최대 ${(item.params?.risk_limits?.max_orders_per_day || 20)}건`
     : `${won.format(item.budget || 0)} 예산`;
   return `
     <article class="strategy-card">
@@ -601,13 +601,17 @@ function formObject(form) {
       value: Number(row.querySelector('[data-dca-input="value"]').value),
     }));
     data.symbol = items.map((item) => item.symbol).join(",");
-    data.budget = 0;
+    data.budget = data.budget === undefined || data.budget === "" ? 0 : Number(data.budget);
     delete data.take_profit_pct;
     delete data.stop_loss_pct;
     data.params = {
       items,
       interval: data.interval,
       execution_time: data.execution_time,
+      risk_limits: {
+        daily_budget_krw: data.budget,
+        max_orders_per_day: Number(data.max_orders_per_day || 20),
+      },
       cost_overrides: {
         fee_pct: data.fee_pct === "" ? null : Number(data.fee_pct),
         tax_pct: data.tax_pct === "" ? null : Number(data.tax_pct),
@@ -622,6 +626,7 @@ function formObject(form) {
   delete data.fee_pct;
   delete data.tax_pct;
   delete data.slippage_pct;
+  delete data.max_orders_per_day;
   data.enabled = false;
   return data;
 }
@@ -629,6 +634,8 @@ function formObject(form) {
 function updateStrategyFields() {
   const form = document.querySelector("#strategyForm");
   const isDca = form.elements.strategy_type.value === "dca";
+  const budgetLabel = document.querySelector("#strategyBudgetField");
+  budgetLabel.firstChild.textContent = isDca ? "일일 예산 한도 (KRW)" : "예산 (KRW)";
   form.querySelectorAll("[data-dca-field]").forEach((element) => element.classList.toggle("hidden", !isDca));
   form.querySelectorAll("[data-standard-field]").forEach((element) => element.classList.toggle("hidden", isDca));
   updateExecutionDayField();
@@ -1032,6 +1039,7 @@ function openStrategyDialog(strategy = null) {
     form.elements.platform.value = strategy.platform || "";
     form.elements.symbol.value = strategy.symbol || "";
     form.elements.budget.value = strategy.budget || 0;
+    form.elements.max_orders_per_day.value = strategy.params?.risk_limits?.max_orders_per_day || strategy.params?.max_orders_per_day || 20;
     form.elements.take_profit_pct.value = strategy.take_profit_pct ?? "";
     form.elements.stop_loss_pct.value = strategy.stop_loss_pct ?? "";
     form.elements.interval.value = strategy.params?.interval || "daily";
@@ -1081,7 +1089,11 @@ function updateStrategyPreview() {
       form.elements.tax_pct.value === "" ? "매수 세금 자동" : `세금 직접 설정 ${number.format(Number(form.elements.tax_pct.value))}%`,
       `슬리피지 ${number.format(Number(form.elements.slippage_pct.value || 0))}%`,
     ].join(", ");
-    description = `${platform}에서 ${scheduleLabel({ interval: form.elements.interval.value, execution_time: form.elements.execution_time.value, execution_day: form.elements.execution_day.value })}에 다음 자산을 매수합니다: ${assets}. 비용 가정: ${costs}.`;
+    const riskLimits = [
+      Number(form.elements.budget.value || 0) > 0 ? `일일 예산 ${won.format(Number(form.elements.budget.value))}` : "일일 예산 제한 없음",
+      `일일 최대 ${Number(form.elements.max_orders_per_day.value || 20)}건`,
+    ].join(", ");
+    description = `${platform}에서 ${scheduleLabel({ interval: form.elements.interval.value, execution_time: form.elements.execution_time.value, execution_day: form.elements.execution_day.value })}에 다음 자산을 매수합니다: ${assets}. 비용 가정: ${costs}. 리스크 제한: ${riskLimits}.`;
   } else {
     description = `${platform}에서 ${won.format(Number(form.elements.budget.value || 0))} 예산으로 ${form.elements.strategy_type.value} 전략을 운용합니다.`;
   }
@@ -1143,7 +1155,11 @@ document.querySelector("#strategiesList").addEventListener("click", async (event
     return;
   }
   if (button.dataset.action === "dry-run") {
-    await api(`/api/strategies/${button.dataset.strategy}/dry-run`, { method: "POST" });
+    try {
+      await api(`/api/strategies/${button.dataset.strategy}/dry-run`, { method: "POST" });
+    } catch (error) {
+      window.alert(error.data?.error || error.message);
+    }
     await Promise.all([renderOrders(), renderStrategyRuns()]);
     return;
   }

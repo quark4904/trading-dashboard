@@ -210,6 +210,8 @@ class RepositoryTests(unittest.TestCase):
             columns = {row["name"] for row in conn.execute("PRAGMA table_info(orders)")}
         self.assertTrue(
             {
+                "idempotency_key",
+                "cancellation_policy",
                 "reference_price",
                 "estimated_notional",
                 "estimated_fee",
@@ -377,6 +379,7 @@ class ValidationTests(unittest.TestCase):
                 "interval": "daily",
                 "execution_time": "22:30",
                 "cost_overrides": {"fee_pct": None, "tax_pct": None, "slippage_pct": 0.0},
+                "risk_limits": {"daily_budget_krw": 0.0, "max_orders_per_day": 20},
             },
         )
 
@@ -816,7 +819,38 @@ class StrategyRunTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.repo = Repository(Path(self.temp_dir.name) / "dashboard.db")
-        self.service = TradingService(self.repo, upbit_fee_provider=lambda _: None)
+        self.upbit_chance = {
+            "market": {
+                "id": "KRW-BTC",
+                "state": "active",
+                "order_types": ["price"],
+                "order_sides": ["bid"],
+                "min_total": "5000",
+                "max_total": "100000000",
+            },
+            "bid_fee": "0.0005",
+            "bid_account": {"balance": "100000"},
+        }
+        self.service = TradingService(
+            self.repo,
+            upbit_fee_provider=lambda _: None,
+            upbit_preflight_provider=lambda _: self.upbit_chance,
+            clock=lambda: datetime(2026, 8, 4, 13, 0, tzinfo=KST),
+        )
+        self.repo.replace_platform_holdings(
+            "upbit",
+            [
+                {
+                    "symbol": "KRW",
+                    "name": "원화",
+                    "asset_type": "cash",
+                    "quantity": 100_000,
+                    "avg_price": 1,
+                    "current_price": 1,
+                    "currency": "KRW",
+                }
+            ],
+        )
         self.strategy = self.repo.create_strategy(
             validate_strategy(
                 {
@@ -855,6 +889,54 @@ class StrategyRunTests(unittest.TestCase):
             history[0]["orders"][0]["cost_profile"]["fee_source"]["kind"],
             "official_policy",
         )
+        self.assertEqual(history[0]["orders"][0]["cancellation_policy"], "reject_before_submission")
+        self.assertLessEqual(len(history[0]["orders"][0]["idempotency_key"]), 36)
+        request = json.loads(history[0]["orders"][0]["request_json"])
+        self.assertEqual(request["idempotency_key"], history[0]["orders"][0]["idempotency_key"])
+
+    def test_preflight_failure_is_recorded_without_a_dry_run_order(self) -> None:
+        preflight = MagicMock(return_value={"error": "종목 조회 실패"})
+        service = TradingService(
+            self.repo,
+            upbit_preflight_provider=preflight,
+            clock=lambda: datetime(2026, 8, 4, 13, 0, tzinfo=KST),
+        )
+
+        run = service.run_dca_strategy_now(self.strategy["id"])
+
+        self.assertEqual(run["status"], "failed")
+        self.assertIn("주문 전 검증 실패", run["error"])
+        self.assertEqual(preflight.call_count, 1)
+        orders = self.repo.orders()
+        self.assertEqual(len(orders), 1)
+        self.assertEqual(orders[0]["status"], "risk_rejected")
+        self.assertIn("종목 조회 실패", orders[0]["reason"])
+        self.assertEqual(self.repo.strategy_runs()[0]["orders"][0]["status"], "risk_rejected")
+
+    def test_daily_order_limit_rejects_the_second_run(self) -> None:
+        strategy = self.repo.create_strategy(
+            validate_strategy(
+                {
+                    "name": "일일 한도 DCA",
+                    "strategy_type": "dca",
+                    "platform": "upbit",
+                    "budget": 6_000,
+                    "params": {
+                        "items": [{"symbol": "KRW-BTC", "value": 5000}],
+                        "max_orders_per_day": 1,
+                    },
+                }
+            )
+        )
+
+        first = self.service.run_dca_strategy_now(strategy["id"])
+        second = self.service.run_dca_strategy_now(strategy["id"])
+
+        self.assertEqual(first["status"], "success")
+        self.assertEqual(second["status"], "failed")
+        self.assertIn("일일 최대 주문 횟수", second["error"])
+        self.assertEqual(len(self.repo.orders()), 2)
+        self.assertEqual(self.repo.orders()[0]["status"], "risk_rejected")
 
     def test_upbit_live_fee_overrides_policy_default(self) -> None:
         service = TradingService(
@@ -864,6 +946,8 @@ class StrategyRunTests(unittest.TestCase):
                 "label": "업비트 테스트 조회",
                 "checked_at": "2026-07-30T00:00:00+00:00",
             },
+            upbit_preflight_provider=lambda _: self.upbit_chance,
+            clock=lambda: datetime(2026, 8, 4, 13, 0, tzinfo=KST),
         )
 
         service.run_dca_strategy_now(self.strategy["id"])
@@ -877,6 +961,8 @@ class StrategyRunTests(unittest.TestCase):
         service = TradingService(
             self.repo,
             upbit_fee_provider=lambda _: {"error": "offline"},
+            upbit_preflight_provider=lambda _: self.upbit_chance,
+            clock=lambda: datetime(2026, 8, 4, 13, 0, tzinfo=KST),
         )
 
         service.run_dca_strategy_now(self.strategy["id"])
@@ -898,7 +984,16 @@ class StrategyRunTests(unittest.TestCase):
                     "avg_price": 10_000,
                     "current_price": 12_000,
                     "currency": "KRW",
-                }
+                },
+                {
+                    "symbol": "KRW",
+                    "name": "주문 가능 현금",
+                    "asset_type": "cash",
+                    "quantity": 100_000,
+                    "avg_price": 1,
+                    "current_price": 1,
+                    "currency": "KRW",
+                },
             ],
         )
         strategy = self.repo.create_strategy(
@@ -933,6 +1028,24 @@ class StrategyRunTests(unittest.TestCase):
         self.assertEqual(second["runs"], [])
         self.assertEqual(len(self.repo.strategy_runs()), 1)
         self.assertEqual(len(self.repo.orders()), 1)
+
+    def test_different_strategies_can_use_the_same_scheduled_minute(self) -> None:
+        second = self.repo.create_strategy(
+            validate_strategy(
+                {
+                    "name": "BTC 두 번째 전략",
+                    "strategy_type": "dca",
+                    "platform": "upbit",
+                    "params": {"items": [{"symbol": "KRW-BTC", "value": 5000}], "execution_time": "09:30"},
+                }
+            )
+        )
+        self.repo.set_strategy_enabled(second["id"], True)
+
+        result = self.service.run_due_dca_strategies(datetime(2026, 7, 12, 9, 30, tzinfo=KST))
+
+        self.assertEqual(len(result["runs"]), 2)
+        self.assertEqual(len(self.repo.strategy_runs()), 2)
 
     def test_weekly_and_monthly_schedule_slots(self) -> None:
         strategy = self.repo.strategy(self.strategy["id"])

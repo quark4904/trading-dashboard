@@ -5,6 +5,7 @@ import re
 
 from app.config import platform_configs
 from app.order_costs import cost_overrides_from_params
+from app.risk import DEFAULT_MAX_ORDERS_PER_DAY
 from app.strategy_capabilities import dca_market_capability
 
 
@@ -85,12 +86,23 @@ def validate_strategy(data: dict) -> dict:
                 raise ValueError("월간 DCA 실행일을 확인하세요.") from exc
             if not 1 <= execution_day <= 28:
                 raise ValueError("월간 DCA 실행일은 1일부터 28일까지 선택할 수 있습니다.")
+        raw_risk_limits = params.get("risk_limits") if isinstance(params.get("risk_limits"), dict) else {}
+        max_orders_per_day = validated_number(
+            params.get("max_orders_per_day", raw_risk_limits.get("max_orders_per_day", DEFAULT_MAX_ORDERS_PER_DAY)),
+            "일일 최대 주문 횟수",
+        )
+        if not max_orders_per_day.is_integer() or not 1 <= max_orders_per_day <= 100:
+            raise ValueError("일일 최대 주문 횟수는 1부터 100까지의 정수여야 합니다.")
         symbol = ",".join(symbols)
         params = {
             "items": items,
             "interval": interval,
             "execution_time": execution_time,
             "cost_overrides": cost_overrides_from_params(params),
+            "risk_limits": {
+                "daily_budget_krw": budget,
+                "max_orders_per_day": int(max_orders_per_day),
+            },
         }
         if interval in {"weekly", "monthly"}:
             params["execution_day"] = execution_day

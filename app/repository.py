@@ -3,9 +3,10 @@ from __future__ import annotations
 import json
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
+from zoneinfo import ZoneInfo
 
 from app.config import DB_PATH, env_flag
 
@@ -50,6 +51,8 @@ class Repository:
                 CREATE TABLE IF NOT EXISTS orders (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     strategy_run_id INTEGER,
+                    idempotency_key TEXT,
+                    cancellation_policy TEXT NOT NULL DEFAULT 'reject_before_submission',
                     created_at TEXT NOT NULL,
                     platform TEXT NOT NULL,
                     symbol TEXT NOT NULL,
@@ -167,6 +170,12 @@ class Repository:
             order_columns = {row["name"] for row in conn.execute("PRAGMA table_info(orders)").fetchall()}
             if "strategy_run_id" not in order_columns:
                 conn.execute("ALTER TABLE orders ADD COLUMN strategy_run_id INTEGER")
+            if "idempotency_key" not in order_columns:
+                conn.execute("ALTER TABLE orders ADD COLUMN idempotency_key TEXT")
+            if "cancellation_policy" not in order_columns:
+                conn.execute(
+                    "ALTER TABLE orders ADD COLUMN cancellation_policy TEXT NOT NULL DEFAULT 'reject_before_submission'"
+                )
             if "currency" not in order_columns:
                 conn.execute("ALTER TABLE orders ADD COLUMN currency TEXT NOT NULL DEFAULT 'KRW'")
             for column in (
@@ -179,6 +188,13 @@ class Repository:
             ):
                 if column not in order_columns:
                     conn.execute(f"ALTER TABLE orders ADD COLUMN {column} REAL")
+            conn.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_idempotency_key
+                ON orders(idempotency_key)
+                WHERE idempotency_key IS NOT NULL
+                """
+            )
             count = conn.execute("SELECT COUNT(*) FROM holdings").fetchone()[0]
             if count == 0 and env_flag("TRADING_DASHBOARD_SEED_DEMO"):
                 self._seed(conn)
@@ -533,6 +549,50 @@ class Repository:
                 for row in conn.execute("SELECT * FROM orders ORDER BY id DESC LIMIT 100")
             ]
 
+    def order_by_idempotency_key(self, idempotency_key: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM orders WHERE idempotency_key = ?",
+                (idempotency_key,),
+            ).fetchone()
+            return self._order_row(row) if row else None
+
+    def cash_holdings(self, platform: str) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT platform, symbol, quantity, current_price, currency, updated_at
+                FROM holdings
+                WHERE platform = ? AND asset_type = 'cash'
+                ORDER BY id
+                """,
+                (platform,),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def strategy_daily_usage(self, strategy_id: int, day: date) -> dict[str, Any]:
+        accepted_statuses = ("dry_run", "submitted", "pending", "filled", "partially_filled")
+        with self.connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT orders.*
+                FROM orders
+                JOIN strategy_runs ON strategy_runs.id = orders.strategy_run_id
+                WHERE strategy_runs.strategy_id = ?
+                  AND orders.status IN ({','.join('?' for _ in accepted_statuses)})
+                ORDER BY orders.id
+                """,
+                (strategy_id, *accepted_statuses),
+            ).fetchall()
+
+        kst = ZoneInfo("Asia/Seoul")
+        matching = []
+        for row in rows:
+            created_at = _parse_datetime(row["created_at"])
+            if created_at and created_at.astimezone(kst).date() == day:
+                matching.append(self._order_row(row))
+        return {"order_count": len(matching), "orders": matching}
+
     def holding_quote(self, platform: str, symbol: str) -> dict[str, Any] | None:
         with self.connect() as conn:
             row = conn.execute(
@@ -554,19 +614,26 @@ class Repository:
         reason: str,
         *,
         strategy_run_id: int | None = None,
+        idempotency_key: str | None = None,
+        cancellation_policy: str = "reject_before_submission",
     ) -> dict[str, Any]:
         now = utc_now()
         with self.connect() as conn:
             cursor = conn.execute(
                 """
                 INSERT INTO orders
-                (strategy_run_id, created_at, platform, symbol, side, order_type, quantity, amount, currency, limit_price,
+                (strategy_run_id, idempotency_key, cancellation_policy, created_at, platform, symbol, side, order_type, quantity, amount, currency, limit_price,
                  reference_price, estimated_notional, estimated_fee, estimated_tax, estimated_slippage, estimated_total,
                  dry_run, status, reason, request_json)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                )
                 """,
                 (
                     strategy_run_id,
+                    idempotency_key or request.get("idempotency_key"),
+                    cancellation_policy or request.get("cancellation_policy") or "reject_before_submission",
                     now,
                     request.get("platform"),
                     request.get("symbol"),
@@ -768,3 +835,13 @@ class Repository:
         with self.connect() as conn:
             cursor = conn.execute("DELETE FROM strategies WHERE id = ?", (strategy_id,))
             return cursor.rowcount > 0
+
+
+def _parse_datetime(value: Any) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)

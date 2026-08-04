@@ -82,7 +82,9 @@ class Handler(BaseHTTPRequestHandler):
                 result = service.run_dca_strategy_now(strategy_id)
             except (IndexError, ValueError) as exc:
                 return self.json_response({"error": str(exc)}, status=400)
-            return self.json_response(result, status=201)
+            status = 201 if result.get("status") == "success" else 422
+            payload = result if status == 201 else {"error": result.get("error") or "주문 전 검증에 실패했습니다.", "run": result}
+            return self.json_response(payload, status=status)
         if parsed.path == "/api/sync/upbit":
             result = service.sync_upbit_holdings()
             return self.json_response(result, status=sync_http_status(result))

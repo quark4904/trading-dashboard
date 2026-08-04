@@ -18,6 +18,8 @@ _CAPABILITIES: dict[str, dict[str, Any]] = {
                 "integer_only": True,
                 "currency": "KRW",
                 "order_type": "MARKET",
+                "min_order_value": 1,
+                "trading_session": "domestic",
             },
             "overseas": {
                 "label": "미국주식",
@@ -29,7 +31,9 @@ _CAPABILITIES: dict[str, dict[str, Any]] = {
                 "integer_only": False,
                 "currency": "USD",
                 "order_type": "MARKET",
+                "min_order_value": 0.01,
                 "regular_hours_only": True,
+                "trading_session": "overseas",
             },
         },
     },
@@ -47,6 +51,8 @@ _CAPABILITIES: dict[str, dict[str, Any]] = {
                 "currency": "KRW",
                 "order_type": "MARKET",
                 "exchange_code": "KRX",
+                "min_order_value": 1,
+                "trading_session": "domestic",
             }
         },
     },
@@ -64,6 +70,8 @@ _CAPABILITIES: dict[str, dict[str, Any]] = {
                 "currency": "KRW",
                 "order_type": "MARKET",
                 "exchange_code": "KRX",
+                "min_order_value": 1,
+                "trading_session": "domestic",
             }
         },
     },
@@ -81,6 +89,8 @@ _CAPABILITIES: dict[str, dict[str, Any]] = {
                 "currency": "KRW",
                 "order_type": "MARKET",
                 "preflight": "GET /v1/orders/chance?market={symbol}",
+                "preflight_required": True,
+                "trading_session": "crypto",
             }
         },
     },
@@ -102,7 +112,12 @@ def dca_market_capability(platform: str, market: str | None = None) -> tuple[str
     return selected_market, market_capability
 
 
-def compile_dca_buy_request(platform: str, item: dict[str, Any]) -> dict[str, Any]:
+def compile_dca_buy_request(
+    platform: str,
+    item: dict[str, Any],
+    *,
+    idempotency_key: str | None = None,
+) -> dict[str, Any]:
     market, capability = dca_market_capability(platform, item.get("market"))
     symbol = item["symbol"]
     if platform == "toss":
@@ -111,9 +126,11 @@ def compile_dca_buy_request(platform: str, item: dict[str, Any]) -> dict[str, An
             request["quantity"] = str(item["quantity"])
         else:
             request["orderAmount"] = str(item["amount"])
+        if idempotency_key:
+            request["clientOrderId"] = idempotency_key
         return {"method": "POST", "path": "/api/v1/orders", "market": market, "body": request}
     if platform in {"kis_pension", "kis_isa"}:
-        return {
+        compiled = {
             "method": "POST",
             "path": "/uapi/domestic-stock/v1/trading/order-cash",
             "market": market,
@@ -125,16 +142,22 @@ def compile_dca_buy_request(platform: str, item: dict[str, Any]) -> dict[str, An
                 "EXCG_ID_DVSN_CD": capability["exchange_code"],
             },
         }
+        if idempotency_key:
+            compiled["idempotency_key"] = idempotency_key
+        return compiled
     if platform == "upbit":
+        body = {
+            "market": symbol,
+            "side": "bid",
+            "ord_type": "price",
+            "price": str(item["amount"]),
+        }
+        if idempotency_key:
+            body["identifier"] = idempotency_key
         return {
             "method": "POST",
             "path": "/v1/orders",
             "market": market,
-            "body": {
-                "market": symbol,
-                "side": "bid",
-                "ord_type": "price",
-                "price": str(item["amount"]),
-            },
+            "body": body,
         }
     raise ValueError("DCA 주문 요청을 생성할 수 없는 플랫폼입니다.")

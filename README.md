@@ -55,6 +55,10 @@ docker compose logs -f
 docker compose down
 ```
 
+## 작업 완료 및 배포
+
+변경 작업은 관련 검증에 문제가 없을 때 **커밋 → 푸시 → Docker Compose 배포 → 배포 후 확인** 순서로 반영합니다. 세부 기준과 중단 조건은 [`docs/work-completion-policy.md`](docs/work-completion-policy.md)에 정리되어 있으며, 프로젝트 작업 지침은 [`AGENTS.md`](AGENTS.md)에서 관리합니다.
+
 ## 포함된 기능
 
 - 전체 손익 요약
@@ -78,6 +82,9 @@ docker compose down
 - 플랫폼별 주문 capability 기반 DCA 입력·검증
 - 토스·한국투자·업비트용 DRY_RUN 주문 요청 컴파일
 - 공식 수수료 정책·사용자 override·업비트 실시간 요율 기반 DRY_RUN 예상 비용 기록
+- 주문 전 플랫폼 현금·최소 금액·거래시간·종목 가능 여부 검증
+- 전략별 일일 예산·최대 주문 횟수 제한과 검증 실패 이력 저장
+- 주문별 멱등성 키와 사전 거부 취소 정책 기록
 
 플랫폼별 주문 필드와 공식 자료 근거는
 [`docs/platform-order-requirements.md`](docs/platform-order-requirements.md)에 정리되어 있습니다.
@@ -157,6 +164,6 @@ KIS_ISA_KEY_EXPIRES_ON=2027-01-01
 
 ## 다음 단계
 
-1. 주문 전 리스크 엔진
+1. 외부 API 재시도·백오프와 동기화/주문 실행 잠금
 2. 백테스트와 모의매매
 3. FastAPI + React 전환

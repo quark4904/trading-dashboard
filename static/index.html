@@ -96,7 +96,8 @@
           <label data-dca-field>실행 주기<select name="interval"><option value="daily">매일</option><option value="weekly">매주</option><option value="monthly">매월</option></select></label>
           <label id="executionDayField" class="hidden" data-dca-field><span id="executionDayLabel">실행 요일</span><select name="execution_day"></select></label>
           <label data-dca-field>실행 시간 (KST)<input name="execution_time" type="time" value="23:30" required /></label>
-          <label data-standard-field>예산 (KRW)<input name="budget" type="number" step="1" min="0" value="0" /></label>
+          <label id="strategyBudgetField">예산 (KRW)<input name="budget" type="number" step="1" min="0" value="0" /></label>
+          <label data-dca-field>일일 최대 주문 횟수<input name="max_orders_per_day" type="number" step="1" min="1" max="100" value="20" /></label>
           <label data-standard-field>익절 %<input name="take_profit_pct" type="number" step="0.1" /></label>
           <label data-standard-field>손절 %<input name="stop_loss_pct" type="number" step="0.1" /></label>
           </div>

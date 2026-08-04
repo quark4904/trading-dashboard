@@ -15,9 +15,16 @@ from app.order_costs import (
     dca_order_notional,
     estimate_dca_buy_cost,
 )
+from app.risk import (
+    CANCELLATION_POLICY,
+    DEFAULT_MAX_ORDERS_PER_DAY,
+    make_idempotency_key,
+    parse_upbit_order_chance,
+    trading_session,
+)
 from app.repository import Repository
 from app.scheduler import KST, scheduled_slot
-from app.strategy_capabilities import compile_dca_buy_request
+from app.strategy_capabilities import compile_dca_buy_request, dca_market_capability
 
 
 DUST_VALUE_THRESHOLD = 100
@@ -30,10 +37,15 @@ class TradingService:
         *,
         fee_policy_store: FeePolicyStore | None = None,
         upbit_fee_provider: Callable[[str], dict[str, Any] | None] | None = None,
+        upbit_preflight_provider: Callable[[str], dict[str, Any] | None] | None = None,
+        clock: Callable[[], datetime] | None = None,
     ):
         self.repo = repo
         self.fee_policy_store = fee_policy_store or FeePolicyStore()
+        self._upbit_fee_provider_explicit = upbit_fee_provider is not None
         self.upbit_fee_provider = upbit_fee_provider or self._fetch_upbit_fee
+        self.upbit_preflight_provider = upbit_preflight_provider or self._fetch_upbit_preflight
+        self.clock = clock or (lambda: datetime.now(KST))
 
     def platforms(self) -> list[dict[str, Any]]:
         configs = platform_configs()
@@ -308,17 +320,28 @@ class TradingService:
         rows = []
         krw_power = _to_float((client.buying_power("KRW").get("result") or {}).get("cashBuyingPower"))
         usd_power = _to_float((client.buying_power("USD").get("result") or {}).get("cashBuyingPower"))
-        cash_amount = krw_power + usd_power * fx_rate
-        if cash_amount > 0:
+        if krw_power > 0:
             rows.append(
                 {
-                    "symbol": "CASH",
-                    "name": "주문 가능 현금",
+                    "symbol": "CASH-KRW",
+                    "name": "주문 가능 현금 (KRW)",
                     "asset_type": "cash",
-                    "quantity": cash_amount,
+                    "quantity": krw_power,
                     "avg_price": 1,
                     "current_price": 1,
                     "currency": "KRW",
+                }
+            )
+        if usd_power > 0:
+            rows.append(
+                {
+                    "symbol": "CASH-USD",
+                    "name": "주문 가능 현금 (USD)",
+                    "asset_type": "cash",
+                    "quantity": usd_power,
+                    "avg_price": 1,
+                    "current_price": fx_rate,
+                    "currency": "USD",
                 }
             )
         for item in (data.get("result") or {}).get("items", []):
@@ -375,7 +398,12 @@ class TradingService:
         for strategy in self.repo.strategies():
             schedule_key = scheduled_slot(strategy, now)
             if schedule_key:
-                result = self._run_dca_strategy(strategy, trigger="scheduled", schedule_key=schedule_key)
+                result = self._run_dca_strategy(
+                    strategy,
+                    trigger="scheduled",
+                    schedule_key=schedule_key,
+                    now=now,
+                )
                 if result:
                     runs.append(result)
         return {"checked_at": now.astimezone(KST).isoformat(), "runs": runs}
@@ -386,7 +414,7 @@ class TradingService:
             raise ValueError("전략을 찾을 수 없습니다.")
         if strategy["strategy_type"] != "dca":
             raise ValueError("DCA 전략만 DRY_RUN 테스트를 실행할 수 있습니다.")
-        return self._run_dca_strategy(strategy, trigger="manual", schedule_key=None)
+        return self._run_dca_strategy(strategy, trigger="manual", schedule_key=None, now=None)
 
     def _run_dca_strategy(
         self,
@@ -394,6 +422,7 @@ class TradingService:
         *,
         trigger: str,
         schedule_key: str | None,
+        now: datetime | None = None,
     ) -> dict[str, Any] | None:
         run = self.repo.start_strategy_run(strategy["id"], trigger, schedule_key)
         if not run:
@@ -403,63 +432,377 @@ class TradingService:
             items = strategy.get("params", {}).get("items") or []
             if not items:
                 raise ValueError("DCA 주문 항목이 없습니다.")
-            cost_overrides = cost_overrides_from_params(strategy.get("params"))
-            for item in items:
-                compiled = compile_dca_buy_request(strategy["platform"], item)
-                quote = self._dca_reference_quote(strategy["platform"], item)
-                reference_price = float(quote["current_price"]) if quote else None
-                notional = dca_order_notional(item, reference_price)
-                live_fee_result = (
-                    self.upbit_fee_provider(item["symbol"])
-                    if strategy["platform"] == "upbit"
-                    else None
+            execution_now = _as_kst(now or self.clock())
+            plans = []
+            for index, item in enumerate(items):
+                key = make_idempotency_key(strategy["id"], run["id"], index, item["symbol"])
+                try:
+                    plans.append(
+                        self._build_dca_order_plan(
+                            strategy,
+                            item,
+                            idempotency_key=key,
+                            now=execution_now,
+                        )
+                    )
+                except Exception as exc:
+                    plans.append(
+                        self._rejected_dca_plan(
+                            strategy,
+                            item,
+                            idempotency_key=key,
+                            reason=str(exc),
+                        )
+                    )
+
+            global_errors = self._validate_dca_plan_limits(strategy, plans, execution_now)
+            errors = _unique_strings(
+                global_errors
+                + [error for plan in plans for error in plan["risk"]["errors"]]
+            )
+            if errors:
+                for plan in plans:
+                    plan["risk"]["status"] = "rejected"
+                    plan["risk"]["errors"] = _unique_strings(plan["risk"]["errors"] + errors)
+                    plan["request"]["risk"] = plan["risk"]
+                    self.repo.create_order(
+                        plan["request"],
+                        status="risk_rejected",
+                        reason=f"주문 전 검증 실패: {'; '.join(plan['risk']['errors'])}",
+                        strategy_run_id=run["id"],
+                        idempotency_key=plan["idempotency_key"],
+                        cancellation_policy=CANCELLATION_POLICY,
+                    )
+                return self.repo.finish_strategy_run(
+                    run["id"],
+                    status="failed",
+                    order_count=0,
+                    error=f"주문 전 검증 실패: {'; '.join(errors)}",
                 )
-                live_fee = (
-                    live_fee_result
-                    if live_fee_result and live_fee_result.get("fee_pct") is not None
-                    else None
-                )
-                cost_profile = self.fee_policy_store.resolve_cost_profile(
-                    strategy["platform"],
-                    item,
-                    notional=notional,
-                    asset_type=quote.get("asset_type") if quote else None,
-                    cost_overrides=cost_overrides,
-                    live_fee=live_fee,
-                )
-                if live_fee_result and live_fee_result.get("error"):
-                    cost_profile["live_fee_lookup"] = {
-                        "status": "fallback",
-                        "error": str(live_fee_result["error"]),
-                    }
-                cost_estimate = estimate_dca_buy_cost(
-                    item,
-                    cost_profile,
-                    reference_price=reference_price,
-                )
-                request = {
-                    "platform": strategy["platform"],
-                    "symbol": item["symbol"],
-                    "side": "buy",
-                    "order_type": "market",
-                    "quantity": item.get("quantity"),
-                    "amount": item.get("amount"),
-                    "currency": item.get("currency", "KRW"),
-                    "dry_run": True,
-                    "compiled_request": compiled,
-                    "cost_overrides": cost_overrides,
-                    "cost_profile": cost_profile,
-                    **cost_estimate,
-                }
+
+            for plan in plans:
                 self.repo.create_order(
-                    request,
+                    plan["request"],
                     status="dry_run",
                     reason="DRY_RUN: 실제 주문을 전송하지 않았습니다.",
                     strategy_run_id=run["id"],
+                    idempotency_key=plan["idempotency_key"],
+                    cancellation_policy=CANCELLATION_POLICY,
                 )
-            return self.repo.finish_strategy_run(run["id"], status="success", order_count=len(items))
+            return self.repo.finish_strategy_run(run["id"], status="success", order_count=len(plans))
         except Exception as exc:
             return self.repo.finish_strategy_run(run["id"], status="failed", error=str(exc))
+
+    def _build_dca_order_plan(
+        self,
+        strategy: dict[str, Any],
+        item: dict[str, Any],
+        *,
+        idempotency_key: str,
+        now: datetime,
+    ) -> dict[str, Any]:
+        platform = strategy["platform"]
+        compiled = compile_dca_buy_request(platform, item, idempotency_key=idempotency_key)
+        quote = self._dca_reference_quote(platform, item)
+        reference_price = float(quote["current_price"]) if quote else None
+        notional = dca_order_notional(item, reference_price)
+
+        upbit_preflight = None
+        upbit_details = None
+        if platform == "upbit":
+            upbit_preflight = self.upbit_preflight_provider(item["symbol"])
+            upbit_details = parse_upbit_order_chance(upbit_preflight, item["symbol"])
+
+        live_fee_result = None
+        if platform == "upbit":
+            live_fee_result = (
+                self.upbit_fee_provider(item["symbol"])
+                if self._upbit_fee_provider_explicit
+                else _upbit_fee_from_preflight(upbit_details)
+            )
+            if live_fee_result is None:
+                live_fee_result = self.upbit_fee_provider(item["symbol"])
+        live_fee = (
+            live_fee_result
+            if live_fee_result and live_fee_result.get("fee_pct") is not None
+            else None
+        )
+        cost_overrides = cost_overrides_from_params(strategy.get("params"))
+        cost_profile = self.fee_policy_store.resolve_cost_profile(
+            platform,
+            item,
+            notional=notional,
+            asset_type=quote.get("asset_type") if quote else None,
+            cost_overrides=cost_overrides,
+            live_fee=live_fee,
+        )
+        if live_fee_result and live_fee_result.get("error"):
+            cost_profile["live_fee_lookup"] = {
+                "status": "fallback",
+                "error": str(live_fee_result["error"]),
+            }
+        cost_estimate = estimate_dca_buy_cost(
+            item,
+            cost_profile,
+            reference_price=reference_price,
+        )
+        request = {
+            "platform": platform,
+            "symbol": item["symbol"],
+            "side": "buy",
+            "order_type": "market",
+            "quantity": item.get("quantity"),
+            "amount": item.get("amount"),
+            "currency": item.get("currency", "KRW"),
+            "dry_run": True,
+            "idempotency_key": idempotency_key,
+            "cancellation_policy": CANCELLATION_POLICY,
+            "compiled_request": compiled,
+            "cost_overrides": cost_overrides,
+            "cost_profile": cost_profile,
+            **cost_estimate,
+        }
+        risk = self._preflight_dca_order(
+            strategy,
+            item,
+            request,
+            idempotency_key=idempotency_key,
+            now=now,
+            quote=quote,
+            upbit_details=upbit_details,
+        )
+        request["risk"] = risk
+        return {
+            "request": request,
+            "risk": risk,
+            "idempotency_key": idempotency_key,
+            "upbit_details": upbit_details,
+        }
+
+    def _rejected_dca_plan(
+        self,
+        strategy: dict[str, Any],
+        item: dict[str, Any],
+        *,
+        idempotency_key: str,
+        reason: str,
+    ) -> dict[str, Any]:
+        request = {
+            "platform": strategy.get("platform"),
+            "symbol": item.get("symbol"),
+            "side": "buy",
+            "order_type": "market",
+            "quantity": item.get("quantity"),
+            "amount": item.get("amount"),
+            "currency": item.get("currency", "KRW"),
+            "dry_run": True,
+            "idempotency_key": idempotency_key,
+            "cancellation_policy": CANCELLATION_POLICY,
+        }
+        risk = {
+            "status": "rejected",
+            "idempotency_key": idempotency_key,
+            "cancellation_policy": CANCELLATION_POLICY,
+            "checks": [],
+            "errors": [reason],
+        }
+        request["risk"] = risk
+        return {
+            "request": request,
+            "risk": risk,
+            "idempotency_key": idempotency_key,
+            "upbit_details": None,
+        }
+
+    def _preflight_dca_order(
+        self,
+        strategy: dict[str, Any],
+        item: dict[str, Any],
+        request: dict[str, Any],
+        *,
+        idempotency_key: str,
+        now: datetime,
+        quote: dict[str, Any] | None,
+        upbit_details: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        platform = strategy["platform"]
+        market = item.get("market") or "domestic"
+        risk: dict[str, Any] = {
+            "status": "passed",
+            "idempotency_key": idempotency_key,
+            "cancellation_policy": CANCELLATION_POLICY,
+            "checks": [],
+            "errors": [],
+        }
+
+        if self.repo.order_by_idempotency_key(idempotency_key):
+            risk["errors"].append("같은 멱등성 키의 주문이 이미 기록되어 있습니다.")
+            risk["checks"].append({"name": "idempotency", "status": "failed", "key": idempotency_key})
+        else:
+            risk["checks"].append({"name": "idempotency", "status": "passed", "key": idempotency_key})
+
+        session = trading_session(platform, market, now)
+        risk["checks"].append({"name": "trading_session", **session, "status": "passed" if session["ok"] else "failed"})
+        if not session["ok"]:
+            risk["errors"].append(session.get("reason") or f"{session['label']} 운영 시간이 아닙니다.")
+
+        if platform == "upbit":
+            details = upbit_details or {"ok": False, "errors": ["업비트 주문 가능 정보가 없습니다."]}
+            risk["checks"].append({"name": "symbol_preflight", "status": "passed" if details.get("ok") else "failed", "details": details})
+            risk["errors"].extend(details.get("errors") or ([] if details.get("ok") else ["업비트 주문 가능 정보 조회에 실패했습니다."]))
+            minimum = details.get("min_total")
+            notional = request.get("estimated_notional")
+            if minimum is not None and notional is not None and float(notional) < float(minimum):
+                risk["errors"].append(f"업비트 최소 주문 금액 {minimum:g}보다 작습니다.")
+            maximum = details.get("max_total")
+            if maximum is not None and notional is not None and float(notional) > float(maximum):
+                risk["errors"].append(f"업비트 최대 주문 금액 {maximum:g}을 초과합니다.")
+        else:
+            _, capability = dca_market_capability(platform, market)
+            item_value = float(item.get("quantity") or item.get("amount") or 0)
+            minimum = float(capability["min_order_value"])
+            minimum_ok = item_value >= minimum
+            risk["checks"].append(
+                {
+                    "name": "minimum_order",
+                    "status": "passed" if minimum_ok else "failed",
+                    "minimum": minimum,
+                    "value": item_value,
+                }
+            )
+            if not minimum_ok:
+                risk["errors"].append(f"플랫폼 최소 주문 값 {minimum:g}보다 작습니다.")
+            symbol_ok = item.get("order_type") != "quantity" or bool(quote)
+            risk["checks"].append(
+                {
+                    "name": "symbol_preflight",
+                    "status": "passed" if symbol_ok else "failed",
+                    "source": "synced_quote" if quote else "unavailable",
+                }
+            )
+            if not symbol_ok:
+                risk["errors"].append("수량 주문의 종목 현재가를 확인할 수 없습니다.")
+
+        if request.get("estimated_total") is None:
+            risk["errors"].append("주문 예상 금액을 산출할 수 없습니다.")
+        risk["status"] = "rejected" if risk["errors"] else "passed"
+        return risk
+
+    def _validate_dca_plan_limits(
+        self,
+        strategy: dict[str, Any],
+        plans: list[dict[str, Any]],
+        now: datetime,
+    ) -> list[str]:
+        params = strategy.get("params") or {}
+        limits = params.get("risk_limits") if isinstance(params.get("risk_limits"), dict) else {}
+        max_orders = int(limits.get("max_orders_per_day") or DEFAULT_MAX_ORDERS_PER_DAY)
+        usage = self.repo.strategy_daily_usage(strategy["id"], now.date())
+        errors: list[str] = []
+        if usage["order_count"] + len(plans) > max_orders:
+            errors.append(
+                f"일일 최대 주문 횟수 {max_orders}건을 초과합니다. "
+                f"(기존 {usage['order_count']}건, 이번 {len(plans)}건)"
+            )
+
+        previous_spend = 0.0
+        for order in usage["orders"]:
+            amount = self._order_krw_value(order)
+            if amount is None:
+                errors.append("기존 주문의 원화 환산 금액을 확인할 수 없습니다.")
+            else:
+                previous_spend += amount
+
+        current_spend = 0.0
+        for plan in plans:
+            amount = self._order_krw_value(plan["request"])
+            if amount is None:
+                continue
+            current_spend += amount
+
+        daily_budget = float(limits.get("daily_budget_krw") or strategy.get("budget") or 0)
+        if daily_budget > 0:
+            if previous_spend + current_spend > daily_budget + 1e-8:
+                errors.append(
+                    f"일일 예산 한도 {daily_budget:g}원을 초과합니다. "
+                    f"(기존 {previous_spend:g}원, 이번 {current_spend:g}원)"
+                )
+
+        grouped: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+        for plan in plans:
+            request = plan["request"]
+            grouped[(str(request.get("platform")), str(request.get("currency") or "KRW"))].append(plan)
+        for (platform, currency), group in grouped.items():
+            required = sum(float(plan["request"].get("estimated_total") or 0) for plan in group)
+            available = self._available_cash(
+                platform,
+                currency,
+                next((plan.get("upbit_details") for plan in group if plan.get("upbit_details")), None),
+            )
+            if available is None:
+                errors.append(f"{platform} {currency} 주문 가능 현금을 확인할 수 없습니다.")
+            elif required > available["amount"] + 1e-8:
+                errors.append(
+                    f"{platform} {currency} 주문 가능 현금이 부족합니다. "
+                    f"(필요 {required:g}, 가능 {available['amount']:g})"
+                )
+
+        return _unique_strings(errors)
+
+    def _available_cash(
+        self,
+        platform: str,
+        currency: str,
+        upbit_details: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        if platform == "upbit" and currency == "KRW" and upbit_details:
+            balance = upbit_details.get("bid_balance")
+            if balance is not None:
+                return {"amount": float(balance), "currency": currency, "source": "upbit_order_chance"}
+
+        rows = self.repo.cash_holdings(platform)
+        if not rows:
+            return None
+        fx_rate = self._usd_krw_rate()
+        total = 0.0
+        for row in rows:
+            native_currency = str(row.get("currency") or "KRW")
+            quantity = float(row.get("quantity") or 0)
+            if native_currency == currency:
+                total += quantity
+            elif native_currency == "USD" and currency == "KRW" and fx_rate:
+                total += quantity * fx_rate
+            elif native_currency == "KRW" and currency == "USD" and fx_rate:
+                total += quantity / fx_rate
+        return {
+            "amount": total,
+            "currency": currency,
+            "source": "synced_cash",
+            "updated_at": max((str(row.get("updated_at") or "") for row in rows), default=None),
+        }
+
+    def _order_krw_value(self, order: dict[str, Any]) -> float | None:
+        total = order.get("estimated_total")
+        if total is None:
+            return None
+        try:
+            total = float(total)
+        except (TypeError, ValueError):
+            return None
+        if str(order.get("currency") or "KRW") == "KRW":
+            return total
+        fx_rate = self._usd_krw_rate()
+        return total * fx_rate if fx_rate else None
+
+    def _usd_krw_rate(self) -> float | None:
+        rate = self.repo.latest_successful_exchange_rate()
+        if not rate:
+            rate = self.repo.latest_exchange_rate()
+        try:
+            value = float(rate["rate"]) if rate and rate.get("rate") is not None else 0
+        except (TypeError, ValueError):
+            value = 0
+        return value if value > 0 else None
 
     def _dca_reference_quote(
         self,
@@ -573,6 +916,13 @@ class TradingService:
             "cost_profile": profile,
             "raw": item,
         }
+
+    @staticmethod
+    def _fetch_upbit_preflight(market: str) -> dict[str, Any]:
+        try:
+            return UpbitClient().order_chance(market)
+        except Exception as exc:
+            return {"error": str(exc)}
 
     @staticmethod
     def _fetch_upbit_fee(market: str) -> dict[str, Any]:
@@ -756,3 +1106,24 @@ def _valuation_status(item: dict[str, Any], value: float) -> str:
     if value < DUST_VALUE_THRESHOLD:
         return "dust"
     return "priced"
+
+
+def _upbit_fee_from_preflight(details: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not details or details.get("bid_fee_pct") is None:
+        return None
+    return {
+        "fee_pct": details["bid_fee_pct"],
+        "label": "업비트 주문 가능 정보 API",
+        "url": "https://docs.upbit.com/kr/kr/reference/available-order-information",
+        "checked_at": details.get("checked_at"),
+    }
+
+
+def _as_kst(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=KST)
+    return value.astimezone(KST)
+
+
+def _unique_strings(values: list[str]) -> list[str]:
+    return list(dict.fromkeys(value for value in values if value))
