@@ -1537,6 +1537,7 @@ class HTTPApiIntegrationTests(unittest.TestCase):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.repo = Repository(Path(self.temp_dir.name) / "dashboard.db")
         self.service = TradingService(self.repo)
+        self.authentication = AuthManager(enabled=False)
         self.handler_class = Handler
 
     def tearDown(self) -> None:
@@ -1545,7 +1546,11 @@ class HTTPApiIntegrationTests(unittest.TestCase):
     def request(self, method: str, path: str, payload: dict | None = None) -> tuple[int, dict | list]:
         handler = self.handler_class.__new__(self.handler_class)
         handler.path = path
-        handler.server = SimpleNamespace(repository=self.repo, trading_service=self.service)
+        handler.server = SimpleNamespace(
+            repository=self.repo,
+            trading_service=self.service,
+            authentication=self.authentication,
+        )
         handler.wfile = io.BytesIO()
         response_status = {}
         handler.send_response = lambda status: response_status.setdefault("status", status)
@@ -1553,7 +1558,16 @@ class HTTPApiIntegrationTests(unittest.TestCase):
         handler.end_headers = lambda: None
         handler.read_json = lambda: payload or {}
         getattr(self.handler_class, f"do_{method}")(handler)
-        return response_status["status"], json.loads(handler.wfile.getvalue().decode("utf-8"))
+        body = handler.wfile.getvalue().decode("utf-8")
+        return response_status["status"], json.loads(body) if body else {}
+
+    def test_access_only_mode_does_not_expose_app_login(self) -> None:
+        status, _ = self.request("GET", "/login")
+        self.assertEqual(status, 303)
+
+        status, payload = self.request("POST", "/api/auth/login", {"username": "operator", "password": "unused"})
+        self.assertEqual(status, 404)
+        self.assertIn("Cloudflare Access", payload["error"])
 
     def test_health_strategy_and_alert_endpoints(self) -> None:
         status, health = self.request("GET", "/api/health")

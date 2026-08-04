@@ -112,6 +112,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_HEAD(self) -> None:
         parsed = urlparse(self.path)
+        if parsed.path in PUBLIC_STATIC_PATHS and not self.authentication.enabled:
+            self.redirect("/")
+            return
         if parsed.path not in PUBLIC_STATIC_PATHS and not self._authorize(READ_ONLY_ROLE):
             return
         target = STATIC_DIR / ("index.html" if parsed.path in ("", "/") else parsed.path.lstrip("/"))
@@ -130,6 +133,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
         if parsed.path in PUBLIC_STATIC_PATHS:
+            if not self.authentication.enabled:
+                return self.redirect("/")
             return self.static_response("/login.html" if parsed.path == "/login" else parsed.path)
         if parsed.path == "/api/auth/me":
             return self.auth_me()
@@ -190,6 +195,11 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
         if parsed.path == "/api/auth/login":
+            if not self.authentication.enabled:
+                return self.json_response(
+                    {"error": "이 배포는 Cloudflare Access 인증을 사용합니다."},
+                    status=404,
+                )
             return self.login()
         if parsed.path == "/api/auth/logout":
             session = self.authentication.session_from_headers(getattr(self, "headers", {}))

@@ -1,28 +1,29 @@
 # 접근 보안과 배포
 
-## 인증과 권한
+## 외부 인증: Cloudflare Tunnel과 Access
 
-애플리케이션은 세션 쿠키와 CSRF 토큰을 사용한다.
+이 운영 환경은 단일 사용자용이므로 Cloudflare Access를 유일한 외부 인증 계층으로 사용한다.
+애플리케이션 비밀번호 로그인은 중복 인증이므로 비활성화한다.
 
-- `viewer`: 포트폴리오·전략·주문·알림 조회
-- `operator`: viewer 권한과 전략 수정, 동기화, DRY_RUN 실행, 알림 확인 처리
-- 세션 쿠키는 `HttpOnly`, `SameSite=Strict`이며, HTTPS 운영에서는 `Secure`를 켠다.
-- 상태 변경 요청은 세션별 CSRF 토큰을 `X-CSRF-Token` 헤더로 요구한다.
-- 인증 활성화 상태에서 비밀번호 해시가 없으면 보호 API를 모두 거부한다.
+1. Cloudflare Zero Trust에서 대시보드를 `Self-hosted application`으로 등록한다.
+2. `dashboard.example.com` 전체를 보호하고, 본인 계정만 허용하는 Allow 정책을 만든다.
+3. Tunnel의 원본 서비스는 `http://127.0.0.1:8765`로 설정한다.
+4. 서버에서는 8765를 외부 인터페이스에 공개하지 않는다.
 
-비밀번호를 평문이나 일반 환경변수 값으로 저장하지 말고, 다음 명령으로 해시를 생성한다.
+예시 Tunnel ingress:
 
-```bash
-python3 -m app.auth hash-password
+```yaml
+ingress:
+  - hostname: dashboard.example.com
+    service: http://127.0.0.1:8765
+  - service: http_status:404
 ```
 
-`.env`에 서로 다른 해시를 설정한다.
+`.env`에서는 다음 값을 유지한다.
 
 ```dotenv
-TRADING_DASHBOARD_AUTH_ENABLED=true
-TRADING_DASHBOARD_VIEWER_PASSWORD_HASH=<generated-viewer-hash>
-TRADING_DASHBOARD_OPERATOR_PASSWORD_HASH=<generated-operator-hash>
-TRADING_DASHBOARD_COOKIE_SECURE=true
+TRADING_DASHBOARD_AUTH_ENABLED=false
+TRADING_DASHBOARD_COOKIE_SECURE=false
 ```
 
 `.env`는 저장소에 커밋하지 않고 권한을 제한한다.
@@ -32,18 +33,24 @@ cp .env.example .env
 chmod 600 .env
 ```
 
-인증이 켜지면 `/api/health`와 로그인 화면·로그인 API만 공개되고, 나머지 API는 로그인과
-역할 검사를 거친다. 인증이 꺼진 기본 Compose 설정은 로컬 개발과 기존 loopback 운영을
-위한 호환 모드이며, 외부 접근을 허용하기 전에는 반드시 인증을 켠다.
+기본 Compose 설정은 포트를 `127.0.0.1`에만 열고, 외부 인증은 Cloudflare Access가 담당한다.
+이 모드에서 대시보드 API는 단일 Access 사용자만 사용하므로 앱 내부의 `viewer/operator`
+분리는 필요하지 않다. 앱 비밀번호 인증 코드는 비상용 선택 기능으로 남아 있지만 기본적으로
+사용하지 않는다.
 
 ## HTTPS reverse proxy
 
-`deploy/Caddyfile`을 사용해 Caddy가 인증서 발급·갱신과 HTTPS 종단을 담당하고, 대시보드
-컨테이너는 Compose 내부 네트워크에서만 Caddy에 연결한다.
+Cloudflare Tunnel을 사용하는 경우 Cloudflare가 외부 HTTPS 종단을 담당하므로 Caddy는
+필수가 아니다. Tunnel을 사용하지 않고 서버에서 직접 HTTPS를 종료할 때만 `secure` profile을
+선택적으로 사용한다.
 
-1. `.env`에 인증 해시와 실제 도메인을 설정한다.
-2. 서버 방화벽에서 80/443만 외부에 허용하고 8765는 localhost로 제한한다.
-3. 보안 프로파일로 실행한다.
+```bash
+docker compose up -d --build
+docker compose ps
+curl --fail http://127.0.0.1:8765/api/health
+```
+
+직접 HTTPS를 사용할 때만 다음을 실행한다.
 
 ```bash
 docker compose --profile secure up -d --build

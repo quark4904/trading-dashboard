@@ -35,14 +35,11 @@ Compose 설정 파일은 `compose.yaml`입니다.
 docker compose up -d --build
 ```
 
-외부 접근이 필요한 운영 환경에서는 인증값과 도메인을 설정한 뒤 HTTPS reverse proxy를 함께 실행합니다.
-환경변수 템플릿은 [`.env.example`](.env.example), 상세 절차는
-[`docs/security-and-deployment.md`](docs/security-and-deployment.md)를 참고하세요.
-
-```bash
-python3 -m app.auth hash-password
-docker compose --profile secure up -d --build
-```
+외부 접근은 Cloudflare Tunnel과 Cloudflare Access를 사용합니다. Access에서 본인 계정만
+허용하고, Tunnel의 원본 서비스는 `http://127.0.0.1:8765`로 설정합니다. 애플리케이션
+비밀번호 로그인은 단일 사용자 운영에서 사용하지 않습니다. 환경변수 템플릿과 상세 절차는
+[`.env.example`](.env.example), [`docs/security-and-deployment.md`](docs/security-and-deployment.md)를
+참고하세요.
 
 기본 Compose 설정은 포트를 서버의 로컬 인터페이스에만 열어 둡니다.
 Cloudflare Tunnel의 서비스 URL은 `http://localhost:8765`로 설정하세요.
@@ -98,8 +95,9 @@ docker compose down
 - 플랫폼별 동기화·전략 실행 lease 잠금과 운영 장애 알림
 - SQLite Online Backup 기반 백업·복구 및 스키마 마이그레이션 이력
 - HTTP API 라우팅·외부 API 재시도 mock 테스트
-- viewer/operator 세션 인증·CSRF 보호·로그인 실패 제한
-- Caddy HTTPS reverse proxy 구성
+- Cloudflare Access 단일 사용자 외부 접근 보호
+- 선택적 viewer/operator 앱 인증·CSRF 보호·로그인 실패 제한
+- 선택적 Caddy HTTPS reverse proxy 구성
 - rotating 운영 로그·SQLite 상태 점검·일일 자동 백업
 
 플랫폼별 주문 필드와 공식 자료 근거는

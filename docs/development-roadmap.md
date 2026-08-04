@@ -87,16 +87,15 @@ SQLite Online Backup API 기반 백업·복구 CLI와 `schema_migrations` 이력
 완료 기준: 인증되지 않은 사용자가 전략 수정, 동기화, 실행 API를 호출할 수 없다.
 **충족**
 
-구현 범위: PBKDF2 비밀번호 해시 기반 `viewer`·`operator` 세션 인증, 역할별 API 권한,
-CSRF 토큰, 보안 응답 헤더와 로그인 실패 제한을 제공한다. Caddy secure profile은 HTTPS
-종단과 외부 접근 제어를 담당하고, 운영 로그·SQLite 상태 점검·일일 백업 및 보존 기간 정리를
-자동화한다. 설정 절차는 [`docs/security-and-deployment.md`](security-and-deployment.md)에
-정리했다.
+구현 범위: Cloudflare Tunnel·Access를 통한 외부 접근 제어, 보안 응답 헤더, 선택적
+PBKDF2 `viewer`·`operator` 앱 인증과 CSRF 보호를 제공한다. Cloudflare Tunnel 운영에서는
+앱 비밀번호 인증을 사용하지 않으며, Caddy secure profile은 Tunnel을 사용하지 않는 환경에서
+선택적으로 사용한다. 운영 로그·SQLite 상태 점검·일일 백업 및 보존 기간 정리도 자동화한다.
+설정 절차는 [`docs/security-and-deployment.md`](security-and-deployment.md)에 정리했다.
 
-운영 전제: 저장소의 `.env`에는 인증 비밀값이 없으므로 기본 Compose 실행은 loopback 호환
-모드다. 외부 접근 전 `TRADING_DASHBOARD_AUTH_ENABLED=true`, 두 역할의 해시,
-`TRADING_DASHBOARD_COOKIE_SECURE=true`, 실제 도메인을 운영 `.env`에 설정하고 `secure`
-profile로 전환해야 한다.
+운영 전제: Cloudflare Access에서 본인 계정만 Allow하고, Tunnel 원본은
+`http://127.0.0.1:8765`로 연결한다. 저장소의 `.env`에는 앱 비밀번호 해시를 설정하지 않고
+`TRADING_DASHBOARD_AUTH_ENABLED=false`를 유지한다.
 
 ## 6단계: 제한된 실주문 전환 — 미완료 ⏳
 

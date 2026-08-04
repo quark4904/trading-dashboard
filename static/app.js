@@ -993,14 +993,6 @@ document.querySelector("#syncStatusDialog").addEventListener("click", (event) =>
   if (event.target === event.currentTarget) event.currentTarget.close();
 });
 
-document.querySelector("#logoutButton").addEventListener("click", async () => {
-  try {
-    await api("/api/auth/logout", { method: "POST" });
-  } finally {
-    window.location.assign("/login");
-  }
-});
-
 document.addEventListener("click", (event) => {
   const button = event.target.closest("[data-alias-symbol]");
   if (!button) return;
