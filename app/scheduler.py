@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import threading
 from datetime import datetime
 from typing import TYPE_CHECKING
@@ -7,6 +8,9 @@ from zoneinfo import ZoneInfo
 
 if TYPE_CHECKING:
     from app.services import TradingService
+
+from app.maintenance import automated_backup
+from app.observability import configure_logging
 
 
 KST = ZoneInfo("Asia/Seoul")
@@ -58,6 +62,8 @@ class StrategyScheduler:
     def __init__(self, service: "TradingService", interval_seconds: int = 15):
         self.service = service
         self.interval_seconds = interval_seconds
+        self.logger = configure_logging()
+        self._last_backup_key: str | None = None
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, name="strategy-scheduler", daemon=True)
 
@@ -73,7 +79,7 @@ class StrategyScheduler:
             try:
                 self.service.run_due_dca_strategies()
             except Exception as exc:  # Keep the dashboard server alive if a scheduler cycle fails.
-                print(f"Strategy scheduler failed: {exc}")
+                self.logger.exception("Strategy scheduler failed")
                 self.service.repo.record_alert(
                     severity="error",
                     category="scheduler_failure",
@@ -81,4 +87,33 @@ class StrategyScheduler:
                     details={"component": "strategy-scheduler"},
                     dedupe_key="scheduler-failure",
                 )
+            self._maybe_backup()
             self._stop.wait(self.interval_seconds)
+
+    def _maybe_backup(self) -> None:
+        if not os.getenv("TRADING_DASHBOARD_BACKUP_DIR", "").strip():
+            return
+        now = datetime.now(KST)
+        backup_time = os.getenv("TRADING_DASHBOARD_BACKUP_TIME", "03:00")
+        try:
+            hour, minute = (int(value) for value in backup_time.split(":", 1))
+        except (TypeError, ValueError):
+            self.logger.error("잘못된 TRADING_DASHBOARD_BACKUP_TIME: %s", backup_time)
+            return
+        backup_key = now.date().isoformat()
+        if (now.hour, now.minute) != (hour, minute) or self._last_backup_key == backup_key:
+            return
+        try:
+            result = automated_backup(self.service.repo.db_path, now=now)
+            if result:
+                self._last_backup_key = backup_key
+                self.logger.info("자동 백업 완료: %s", result["destination"])
+        except Exception as exc:
+            self.logger.exception("자동 백업 실패")
+            self.service.repo.record_alert(
+                severity="error",
+                category="backup_failure",
+                message=f"자동 백업 실패: {exc}",
+                details={"backup_time": backup_time},
+                dedupe_key="backup-failure",
+            )

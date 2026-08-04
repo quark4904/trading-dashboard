@@ -22,11 +22,27 @@ const state = {
 };
 
 async function api(path, options = {}) {
+  const method = (options.method || "GET").toUpperCase();
+  const headers = {
+    "Content-Type": "application/json",
+    ...(options.headers || {}),
+  };
+  if (!["GET", "HEAD", "OPTIONS"].includes(method)) {
+    const csrf = document.cookie
+      .split(";")
+      .map((item) => item.trim())
+      .find((item) => item.startsWith("td_csrf="))
+      ?.split("=", 2)[1];
+    if (csrf) headers["X-CSRF-Token"] = decodeURIComponent(csrf);
+  }
   const response = await fetch(path, {
-    headers: { "Content-Type": "application/json" },
     ...options,
+    headers,
   });
   const data = await response.json();
+  if (response.status === 401) {
+    window.location.assign("/login");
+  }
   if (!response.ok) {
     const error = new Error(data.error || `API ${response.status}`);
     error.data = data;
@@ -975,6 +991,14 @@ document.querySelector("#syncDialogClose").addEventListener("click", () => {
 
 document.querySelector("#syncStatusDialog").addEventListener("click", (event) => {
   if (event.target === event.currentTarget) event.currentTarget.close();
+});
+
+document.querySelector("#logoutButton").addEventListener("click", async () => {
+  try {
+    await api("/api/auth/logout", { method: "POST" });
+  } finally {
+    window.location.assign("/login");
+  }
 });
 
 document.addEventListener("click", (event) => {

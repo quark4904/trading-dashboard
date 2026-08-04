@@ -15,6 +15,7 @@ from urllib.error import HTTPError
 from urllib.request import Request
 from unittest.mock import MagicMock, patch
 
+from app.auth import AuthManager, hash_password, verify_password
 from app.config import api_key_expirations
 from app.fee_policies import FeePolicyStore
 from app.integrations.fx import FxError, usd_krw_rate
@@ -339,6 +340,159 @@ class ExternalHTTPResilienceTests(unittest.TestCase):
             )
 
         self.assertEqual(opener.call_count, 1)
+
+
+class AuthenticationTests(unittest.TestCase):
+    def test_password_hash_is_not_reversible_and_sessions_have_csrf_tokens(self) -> None:
+        encoded = hash_password("correct horse")
+        self.assertTrue(verify_password("correct horse", encoded))
+        self.assertFalse(verify_password("wrong horse", encoded))
+
+        manager = AuthManager(
+            enabled=True,
+            viewer_password_hash=encoded,
+            operator_password_hash=hash_password("operator password"),
+        )
+        session = manager.authenticate("viewer", "correct horse", client_key="test")
+
+        self.assertEqual(session.user.role, "viewer")
+        self.assertTrue(session.csrf_token)
+        self.assertTrue(manager.csrf_valid({"X-CSRF-Token": session.csrf_token}, session))
+        self.assertFalse(manager.csrf_valid({"X-CSRF-Token": "wrong"}, session))
+
+    def test_failed_login_is_rate_limited(self) -> None:
+        manager = AuthManager(
+            enabled=True,
+            viewer_password_hash=hash_password("viewer password"),
+            operator_password_hash=hash_password("operator password"),
+        )
+        for _ in range(5):
+            with self.assertRaises(PermissionError):
+                manager.authenticate("viewer", "wrong", client_key="same-client")
+        self.assertFalse(manager.login_allowed("same-client"))
+
+
+class HTTPAuthenticationIntegrationTests(unittest.TestCase):
+    def setUp(self) -> None:
+        from app.main import Handler
+
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.repo = Repository(Path(self.temp_dir.name) / "dashboard.db")
+        self.service = TradingService(self.repo)
+        self.authentication = AuthManager(
+            enabled=True,
+            viewer_password_hash=hash_password("viewer password"),
+            operator_password_hash=hash_password("operator password"),
+        )
+        self.handler_class = Handler
+
+    def tearDown(self) -> None:
+        self.temp_dir.cleanup()
+
+    def request(
+        self,
+        method: str,
+        path: str,
+        payload: dict | None = None,
+        *,
+        headers: dict[str, str] | None = None,
+    ) -> tuple[int, dict | list, dict[str, str]]:
+        handler = self.handler_class.__new__(self.handler_class)
+        handler.path = path
+        handler.headers = headers or {}
+        handler.server = SimpleNamespace(
+            repository=self.repo,
+            trading_service=self.service,
+            authentication=self.authentication,
+        )
+        handler.wfile = io.BytesIO()
+        response_status = {}
+        response_headers: dict[str, str] = {}
+        cookies: list[str] = []
+        handler.send_response = lambda status: response_status.setdefault("status", status)
+
+        def capture_header(name: str, value: str) -> None:
+            if name.lower() == "set-cookie":
+                cookies.append(value)
+            else:
+                response_headers[name] = value
+
+        handler.send_header = capture_header
+        handler.end_headers = lambda: None
+        handler.read_json = lambda: payload or {}
+        getattr(self.handler_class, f"do_{method}")(handler)
+        response_headers["Set-Cookie"] = "\n".join(cookies)
+        body = handler.wfile.getvalue().decode("utf-8")
+        return response_status["status"], json.loads(body) if body else {}, response_headers
+
+    @staticmethod
+    def cookie_header(set_cookie: str) -> str:
+        return "; ".join(item.split(";", 1)[0] for item in set_cookie.splitlines() if item)
+
+    @staticmethod
+    def csrf_token(cookie: str) -> str:
+        for item in cookie.split("; "):
+            if item.startswith("td_csrf="):
+                return item.split("=", 1)[1]
+        return ""
+
+    def test_unauthenticated_reads_and_writes_are_blocked(self) -> None:
+        status, _, _ = self.request("GET", "/api/strategies")
+        self.assertEqual(status, 401)
+        status, _, headers = self.request("GET", "/")
+        self.assertEqual(status, 303)
+        self.assertEqual(headers["Location"], "/login")
+        self.assertEqual(headers["X-Frame-Options"], "DENY")
+
+    def test_health_fails_when_authentication_is_incomplete(self) -> None:
+        self.authentication = AuthManager(enabled=True)
+
+        status, payload, _ = self.request("GET", "/api/health")
+
+        self.assertEqual(status, 503)
+        self.assertFalse(payload["ok"])
+        self.assertFalse(payload["auth"]["configured"])
+
+    def test_operator_can_write_only_with_csrf_token_and_viewer_is_read_only(self) -> None:
+        status, _, response_headers = self.request(
+            "POST",
+            "/api/auth/login",
+            {"username": "operator", "password": "operator password"},
+        )
+        self.assertEqual(status, 200)
+        operator_cookie = self.cookie_header(response_headers["Set-Cookie"])
+        operator_csrf = self.csrf_token(operator_cookie)
+
+        status, _, _ = self.request("POST", "/api/strategies", {}, headers={"Cookie": operator_cookie})
+        self.assertEqual(status, 403)
+        status, created, _ = self.request(
+            "POST",
+            "/api/strategies",
+            {
+                "name": "보호된 전략",
+                "strategy_type": "custom",
+                "platform": "",
+                "params": {},
+            },
+            headers={"Cookie": operator_cookie, "X-CSRF-Token": operator_csrf},
+        )
+        self.assertEqual(status, 201)
+        self.assertEqual(created["name"], "보호된 전략")
+
+        status, _, viewer_headers = self.request(
+            "POST",
+            "/api/auth/login",
+            {"username": "viewer", "password": "viewer password"},
+        )
+        viewer_cookie = self.cookie_header(viewer_headers["Set-Cookie"])
+        viewer_csrf = self.csrf_token(viewer_cookie)
+        status, _, _ = self.request(
+            "POST",
+            "/api/strategies",
+            {"name": "차단 전략", "strategy_type": "custom", "platform": "", "params": {}},
+            headers={"Cookie": viewer_cookie, "X-CSRF-Token": viewer_csrf},
+        )
+        self.assertEqual(status, 403)
 
 
 class ApiKeyExpirationTests(unittest.TestCase):

@@ -562,6 +562,18 @@ class Repository:
             row = conn.execute("SELECT MAX(version) AS version FROM schema_migrations").fetchone()
             return int(row["version"] or 0)
 
+    def health_status(self) -> dict[str, Any]:
+        try:
+            with self.connect() as conn:
+                result = str(conn.execute("PRAGMA quick_check(1)").fetchone()[0])
+            return {
+                "ok": result.lower() == "ok",
+                "integrity": result,
+                "schema_version": self.schema_version(),
+            }
+        except sqlite3.Error as exc:
+            return {"ok": False, "integrity": str(exc), "schema_version": None}
+
     def migration_history(self) -> list[dict[str, Any]]:
         with self.connect() as conn:
             rows = conn.execute(

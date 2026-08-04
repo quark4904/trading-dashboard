@@ -35,6 +35,15 @@ Compose 설정 파일은 `compose.yaml`입니다.
 docker compose up -d --build
 ```
 
+외부 접근이 필요한 운영 환경에서는 인증값과 도메인을 설정한 뒤 HTTPS reverse proxy를 함께 실행합니다.
+환경변수 템플릿은 [`.env.example`](.env.example), 상세 절차는
+[`docs/security-and-deployment.md`](docs/security-and-deployment.md)를 참고하세요.
+
+```bash
+python3 -m app.auth hash-password
+docker compose --profile secure up -d --build
+```
+
 기본 Compose 설정은 포트를 서버의 로컬 인터페이스에만 열어 둡니다.
 Cloudflare Tunnel의 서비스 URL은 `http://localhost:8765`로 설정하세요.
 
@@ -89,6 +98,9 @@ docker compose down
 - 플랫폼별 동기화·전략 실행 lease 잠금과 운영 장애 알림
 - SQLite Online Backup 기반 백업·복구 및 스키마 마이그레이션 이력
 - HTTP API 라우팅·외부 API 재시도 mock 테스트
+- viewer/operator 세션 인증·CSRF 보호·로그인 실패 제한
+- Caddy HTTPS reverse proxy 구성
+- rotating 운영 로그·SQLite 상태 점검·일일 자동 백업
 
 플랫폼별 주문 필드와 공식 자료 근거는
 [`docs/platform-order-requirements.md`](docs/platform-order-requirements.md)에 정리되어 있습니다.
@@ -168,8 +180,6 @@ KIS_ISA_KEY_EXPIRES_ON=2027-01-01
 
 ## 다음 단계
 
-1. 대시보드 인증 및 권한 분리
-2. HTTPS 리버스 프록시와 외부 접근 제어
-3. 비밀값 관리 방식 정리 및 `.env.example` 제공
-4. 백테스트와 모의매매
-5. FastAPI + React 전환
+1. 백테스트와 모의매매
+2. FastAPI + React 전환
+3. 제한된 실주문 전환

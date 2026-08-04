@@ -6,24 +6,40 @@ import argparse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, unquote, urlparse
 
+from app.auth import AuthConfigurationError, AuthManager
 from app.config import ROOT_DIR, api_key_expirations, platform_configs
 from app.repository import Repository
 from app.scheduler import StrategyScheduler
 from app.services import TradingService
+from app.observability import configure_logging
 from app.strategy_capabilities import strategy_capabilities
 from app.validation import validate_strategy
 
 
 STATIC_DIR = ROOT_DIR / "static"
+logger = configure_logging()
 repo = Repository()
 service = TradingService(repo)
+auth_manager = AuthManager()
+
+PUBLIC_STATIC_PATHS = {"/login", "/login.html", "/login.js", "/login.css"}
+READ_ONLY_ROLE = "viewer"
+MUTATING_ROLE = "operator"
 
 
 class DashboardHTTPServer(ThreadingHTTPServer):
-    def __init__(self, server_address, handler_class, repository: Repository, trading_service: TradingService):
+    def __init__(
+        self,
+        server_address,
+        handler_class,
+        repository: Repository,
+        trading_service: TradingService,
+        authentication: AuthManager,
+    ):
         super().__init__(server_address, handler_class)
         self.repository = repository
         self.trading_service = trading_service
+        self.authentication = authentication
 
 
 def create_server(
@@ -32,10 +48,12 @@ def create_server(
     *,
     repository: Repository | None = None,
     trading_service: TradingService | None = None,
+    authentication: AuthManager | None = None,
 ) -> DashboardHTTPServer:
     repository = repository or Repository()
     trading_service = trading_service or TradingService(repository)
-    return DashboardHTTPServer((host, port), Handler, repository, trading_service)
+    authentication = authentication or AuthManager()
+    return DashboardHTTPServer((host, port), Handler, repository, trading_service, authentication)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -49,14 +67,61 @@ class Handler(BaseHTTPRequestHandler):
     def trading_service(self) -> TradingService:
         return self.server.trading_service
 
+    @property
+    def authentication(self) -> AuthManager:
+        return getattr(self.server, "authentication", auth_manager)
+
+    def _authorize(self, required_role: str = READ_ONLY_ROLE, *, mutation: bool = False) -> bool:
+        headers = getattr(self, "headers", {})
+        try:
+            if self.authentication.enabled and not self.authentication.configured:
+                raise AuthConfigurationError(
+                    "인증이 활성화되었지만 viewer/operator 비밀번호 해시가 설정되지 않았습니다."
+                )
+            session = self.authentication.session_from_headers(headers)
+        except AuthConfigurationError as exc:
+            if self.path.startswith("/api/"):
+                self.json_response({"error": str(exc)}, status=503)
+            else:
+                self.json_response({"error": str(exc)}, status=503)
+            return False
+
+        if session is None:
+            if self.path.startswith("/api/"):
+                self.json_response(
+                    {"error": "로그인이 필요합니다."},
+                    status=401,
+                    headers={"WWW-Authenticate": "Bearer"},
+                )
+            else:
+                self.redirect("/login")
+            return False
+
+        if required_role == MUTATING_ROLE and session.user.role != MUTATING_ROLE:
+            self.json_response({"error": "operator 권한이 필요합니다."}, status=403)
+            return False
+        if mutation and not self.authentication.csrf_valid(headers, session):
+            self.json_response({"error": "CSRF 토큰이 없거나 올바르지 않습니다."}, status=403)
+            return False
+        self.current_session = session
+        return True
+
+    def _client_key(self) -> str:
+        address = getattr(self, "client_address", ("unknown", 0))
+        return str(address[0]) if address else "unknown"
+
     def do_HEAD(self) -> None:
         parsed = urlparse(self.path)
+        if parsed.path not in PUBLIC_STATIC_PATHS and not self._authorize(READ_ONLY_ROLE):
+            return
         target = STATIC_DIR / ("index.html" if parsed.path in ("", "/") else parsed.path.lstrip("/"))
         if not target.exists() or not target.is_file() or STATIC_DIR not in target.resolve().parents:
             self.send_response(404)
+            self.security_headers()
             self.end_headers()
             return
         self.send_response(200)
+        self.security_headers()
         self.send_header("Content-Type", mimetypes.guess_type(target.name)[0] or "application/octet-stream")
         self.send_header("Content-Length", str(target.stat().st_size))
         self.send_header("Cache-Control", "no-store")
@@ -64,14 +129,26 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
+        if parsed.path in PUBLIC_STATIC_PATHS:
+            return self.static_response("/login.html" if parsed.path == "/login" else parsed.path)
+        if parsed.path == "/api/auth/me":
+            return self.auth_me()
         if parsed.path == "/api/health":
+            database = self.repository.health_status()
+            auth = self.authentication.status()
+            ready = database["ok"] and (not auth["enabled"] or auth["configured"])
             return self.json_response(
                 {
-                    "ok": True,
+                    "ok": ready,
                     "mode": "dry_run",
                     "active_alerts": self.repository.unresolved_alert_count(),
-                }
+                    "database": database,
+                    "auth": auth,
+                },
+                status=200 if ready else 503,
             )
+        if not self._authorize(READ_ONLY_ROLE):
+            return
         if parsed.path == "/api/platforms":
             return self.json_response(self.trading_service.platforms())
         if parsed.path == "/api/portfolio/summary":
@@ -112,6 +189,19 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
+        if parsed.path == "/api/auth/login":
+            return self.login()
+        if parsed.path == "/api/auth/logout":
+            session = self.authentication.session_from_headers(getattr(self, "headers", {}))
+            if session and not self.authentication.csrf_valid(getattr(self, "headers", {}), session):
+                return self.json_response({"error": "CSRF 토큰이 없거나 올바르지 않습니다."}, status=403)
+            self.authentication.revoke(session)
+            return self.json_response(
+                {"logged_out": True},
+                cookies=self.authentication.clear_cookie_headers(),
+            )
+        if not self._authorize(MUTATING_ROLE, mutation=True):
+            return
         try:
             data = self.read_json()
         except ValueError as exc:
@@ -151,7 +241,53 @@ class Handler(BaseHTTPRequestHandler):
             return self.json_response(created, status=201)
         return self.json_response({"error": "not found"}, status=404)
 
+    def login(self) -> None:
+        try:
+            data = self.read_json()
+        except ValueError as exc:
+            return self.json_response({"error": str(exc)}, status=400)
+        username = str(data.get("username") or "").strip()
+        password = data.get("password")
+        if username not in {"viewer", "operator"} or not isinstance(password, str) or not password:
+            return self.json_response({"error": "사용자 이름과 비밀번호를 확인해 주세요."}, status=400)
+
+        client_key = self._client_key()
+        if not self.authentication.login_allowed(client_key):
+            return self.json_response({"error": "로그인 시도가 일시적으로 제한되었습니다."}, status=429)
+        try:
+            session = self.authentication.authenticate(username, password, client_key=client_key)
+        except AuthConfigurationError as exc:
+            return self.json_response({"error": str(exc)}, status=503)
+        except PermissionError as exc:
+            return self.json_response({"error": str(exc)}, status=401)
+        return self.json_response(
+            {
+                "authenticated": True,
+                "user": {"username": session.user.username, "role": session.user.role},
+            },
+            cookies=self.authentication.session_cookie_headers(session),
+        )
+
+    def auth_me(self) -> None:
+        if self.authentication.enabled and not self.authentication.configured:
+            return self.json_response(
+                {"authenticated": False, "auth": self.authentication.status()},
+                status=503,
+            )
+        session = self.authentication.session_from_headers(getattr(self, "headers", {}))
+        if session is None:
+            return self.json_response({"authenticated": False}, status=401)
+        return self.json_response(
+            {
+                "authenticated": True,
+                "auth": self.authentication.status(),
+                "user": {"username": session.user.username, "role": session.user.role},
+            }
+        )
+
     def do_PATCH(self) -> None:
+        if not self._authorize(MUTATING_ROLE, mutation=True):
+            return
         parsed = urlparse(self.path)
         if parsed.path.startswith("/api/alerts/"):
             parts = parsed.path.strip("/").split("/")
@@ -182,6 +318,8 @@ class Handler(BaseHTTPRequestHandler):
         return self.json_response({"error": "not found"}, status=404)
 
     def do_PUT(self) -> None:
+        if not self._authorize(MUTATING_ROLE, mutation=True):
+            return
         parsed = urlparse(self.path)
         if parsed.path.startswith("/api/strategies/"):
             parts = parsed.path.strip("/").split("/")
@@ -219,6 +357,8 @@ class Handler(BaseHTTPRequestHandler):
         return self.json_response(self.repository.set_asset_alias(platform, symbol, alias))
 
     def do_DELETE(self) -> None:
+        if not self._authorize(MUTATING_ROLE, mutation=True):
+            return
         parsed = urlparse(self.path)
         if parsed.path.startswith("/api/strategies/"):
             parts = parsed.path.strip("/").split("/")
@@ -257,14 +397,45 @@ class Handler(BaseHTTPRequestHandler):
             raise ValueError("JSON 객체 형식이 필요합니다.")
         return data
 
-    def json_response(self, data, status: int = 200) -> None:
+    def json_response(
+        self,
+        data,
+        status: int = 200,
+        *,
+        headers: dict[str, str] | None = None,
+        cookies: list[str] | None = None,
+    ) -> None:
         payload = json.dumps(data, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
+        self.security_headers()
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(payload)))
         self.send_header("Cache-Control", "no-store")
+        for key, value in (headers or {}).items():
+            self.send_header(key, value)
+        for cookie in cookies or []:
+            self.send_header("Set-Cookie", cookie)
         self.end_headers()
         self.wfile.write(payload)
+
+    def redirect(self, location: str) -> None:
+        self.send_response(303)
+        self.security_headers()
+        self.send_header("Location", location)
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+
+    def security_headers(self) -> None:
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header(
+            "Content-Security-Policy",
+            "default-src 'self'; style-src 'self' https://fonts.googleapis.com; "
+            "font-src 'self' https://fonts.gstatic.com; script-src 'self'; "
+            "connect-src 'self'; img-src 'self' data:; frame-ancestors 'none'; "
+            "base-uri 'self'; form-action 'self'",
+        )
 
     def static_response(self, path: str) -> None:
         target = STATIC_DIR / ("index.html" if path in ("", "/") else path.lstrip("/"))
@@ -275,6 +446,7 @@ class Handler(BaseHTTPRequestHandler):
         if target.suffix == ".js":
             content_type = "text/javascript"
         self.send_response(200)
+        self.security_headers()
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(content)))
         self.send_header("Cache-Control", "no-store")
@@ -282,14 +454,14 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(content)
 
     def log_message(self, format: str, *args) -> None:
-        print(f"{self.address_string()} - {format % args}")
+        logger.info("%s - %s", self.address_string(), format % args)
 
 
 def run(host: str = "127.0.0.1", port: int = 8765) -> None:
     server = create_server(host, port, repository=repo, trading_service=service)
     scheduler = StrategyScheduler(service)
     scheduler.start()
-    print(f"Trading dashboard MVP running at http://{host}:{port}")
+    logger.info("Trading dashboard MVP running at http://%s:%s", host, port)
     try:
         server.serve_forever()
     finally:

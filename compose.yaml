@@ -13,6 +13,16 @@ services:
       TRADING_DASHBOARD_RETRY_BACKOFF_SECONDS: ${TRADING_DASHBOARD_RETRY_BACKOFF_SECONDS:-0.25}
       TRADING_DASHBOARD_RETRY_MAX_BACKOFF_SECONDS: ${TRADING_DASHBOARD_RETRY_MAX_BACKOFF_SECONDS:-4}
       TRADING_DASHBOARD_API_MIN_INTERVAL_SECONDS: ${TRADING_DASHBOARD_API_MIN_INTERVAL_SECONDS:-0.05}
+      TRADING_DASHBOARD_AUTH_ENABLED: ${TRADING_DASHBOARD_AUTH_ENABLED:-false}
+      TRADING_DASHBOARD_VIEWER_PASSWORD_HASH: ${TRADING_DASHBOARD_VIEWER_PASSWORD_HASH:-}
+      TRADING_DASHBOARD_OPERATOR_PASSWORD_HASH: ${TRADING_DASHBOARD_OPERATOR_PASSWORD_HASH:-}
+      TRADING_DASHBOARD_SESSION_TTL_SECONDS: ${TRADING_DASHBOARD_SESSION_TTL_SECONDS:-28800}
+      TRADING_DASHBOARD_COOKIE_SECURE: ${TRADING_DASHBOARD_COOKIE_SECURE:-false}
+      TRADING_DASHBOARD_LOG_PATH: ${TRADING_DASHBOARD_LOG_PATH:-/data/trading_dashboard.log}
+      TRADING_DASHBOARD_LOG_LEVEL: ${TRADING_DASHBOARD_LOG_LEVEL:-INFO}
+      TRADING_DASHBOARD_BACKUP_DIR: ${TRADING_DASHBOARD_BACKUP_DIR:-/data/backups}
+      TRADING_DASHBOARD_BACKUP_TIME: ${TRADING_DASHBOARD_BACKUP_TIME:-03:00}
+      TRADING_DASHBOARD_BACKUP_RETENTION_DAYS: ${TRADING_DASHBOARD_BACKUP_RETENTION_DAYS:-7}
       UPBIT_ACCESS_KEY: ${UPBIT_ACCESS_KEY:-}
       UPBIT_SECRET_KEY: ${UPBIT_SECRET_KEY:-}
       UPBIT_KEY_EXPIRES_ON: ${UPBIT_KEY_EXPIRES_ON:-}
@@ -43,9 +53,28 @@ services:
     volumes:
       - ./data:/data
       - ./config:/app/config:ro
+    init: true
     healthcheck:
       test: ["CMD", "python", "-c", "from urllib.request import urlopen; urlopen('http://127.0.0.1:8765/api/health', timeout=3).read()"]
       interval: 30s
       timeout: 5s
       retries: 3
       start_period: 10s
+
+  caddy:
+    profiles: ["secure"]
+    image: caddy:2-alpine
+    container_name: trading-dashboard-caddy
+    restart: unless-stopped
+    depends_on:
+      trading-dashboard:
+        condition: service_healthy
+    environment:
+      TRADING_DASHBOARD_DOMAIN: ${TRADING_DASHBOARD_DOMAIN:-localhost}
+    ports:
+      - "${TRADING_DASHBOARD_HTTP_PORT:-80}:80"
+      - "${TRADING_DASHBOARD_HTTPS_PORT:-443}:443"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./deploy/caddy-data:/data
+      - ./deploy/caddy-config:/config

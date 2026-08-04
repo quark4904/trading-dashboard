@@ -1,6 +1,8 @@
 .env
 *.db
 data/
+deploy/caddy-data/
+deploy/caddy-config/
 __pycache__/
 .DS_Store
 node_modules/

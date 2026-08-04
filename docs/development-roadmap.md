@@ -77,14 +77,26 @@
 SQLite Online Backup API 기반 백업·복구 CLI와 `schema_migrations` 이력을 제공한다. 백업·복구
 명령과 운영 전후 확인 절차는 [`docs/operations.md`](operations.md)에 정리했다.
 
-## 5단계: 접근 보안과 배포 — 미완료 ⏳
+## 5단계: 접근 보안과 배포 — 구현 완료 ✅
 
-- [ ] 대시보드 인증 및 권한 분리
-- [ ] HTTPS 리버스 프록시와 외부 접근 제어
-- [ ] 비밀값 관리 방식 정리 및 `.env.example` 제공
-- [ ] 운영 로그·상태 점검·백업 자동화
+- [x] 대시보드 인증 및 권한 분리
+- [x] HTTPS 리버스 프록시와 외부 접근 제어
+- [x] 비밀값 관리 방식 정리 및 `.env.example` 제공
+- [x] 운영 로그·상태 점검·백업 자동화
 
 완료 기준: 인증되지 않은 사용자가 전략 수정, 동기화, 실행 API를 호출할 수 없다.
+**충족**
+
+구현 범위: PBKDF2 비밀번호 해시 기반 `viewer`·`operator` 세션 인증, 역할별 API 권한,
+CSRF 토큰, 보안 응답 헤더와 로그인 실패 제한을 제공한다. Caddy secure profile은 HTTPS
+종단과 외부 접근 제어를 담당하고, 운영 로그·SQLite 상태 점검·일일 백업 및 보존 기간 정리를
+자동화한다. 설정 절차는 [`docs/security-and-deployment.md`](security-and-deployment.md)에
+정리했다.
+
+운영 전제: 저장소의 `.env`에는 인증 비밀값이 없으므로 기본 Compose 실행은 loopback 호환
+모드다. 외부 접근 전 `TRADING_DASHBOARD_AUTH_ENABLED=true`, 두 역할의 해시,
+`TRADING_DASHBOARD_COOKIE_SECURE=true`, 실제 도메인을 운영 `.env`에 설정하고 `secure`
+profile로 전환해야 한다.
 
 ## 6단계: 제한된 실주문 전환 — 미완료 ⏳
 

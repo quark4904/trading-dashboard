@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from uuid import uuid4
 
@@ -104,6 +105,41 @@ def restore_database(
     }
 
 
+def automated_backup(
+    source: Path = DB_PATH,
+    backup_dir: Path | None = None,
+    *,
+    retention_days: int | None = None,
+    now: datetime | None = None,
+) -> dict[str, object] | None:
+    configured_dir = os.getenv("TRADING_DASHBOARD_BACKUP_DIR", "").strip()
+    if backup_dir is None:
+        if not configured_dir:
+            return None
+        backup_dir = Path(configured_dir)
+    backup_dir = Path(backup_dir)
+    if retention_days is None:
+        retention_days = _env_int("TRADING_DASHBOARD_BACKUP_RETENTION_DAYS", 7, minimum=1, maximum=365)
+    now = now or datetime.now(timezone.utc)
+    stamp = now.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    destination = backup_dir / f"{Path(source).stem}-{stamp}{Path(source).suffix}"
+    result = backup_database(source, destination)
+
+    cutoff = now.timestamp() - timedelta(days=retention_days).total_seconds()
+    removed: list[str] = []
+    pattern = f"{Path(source).stem}-*.db"
+    for candidate in backup_dir.glob(pattern):
+        if candidate == destination or not candidate.is_file() or candidate.is_symlink():
+            continue
+        try:
+            if candidate.stat().st_mtime < cutoff:
+                candidate.unlink()
+                removed.append(str(candidate))
+        except OSError:
+            continue
+    return {**result, "removed": removed, "retention_days": retention_days}
+
+
 def _copy_database(source: Path, destination: Path) -> None:
     with sqlite3.connect(source) as source_conn, sqlite3.connect(destination) as destination_conn:
         source_conn.backup(destination_conn)
@@ -114,6 +150,14 @@ def _validate_copy_paths(source: Path, destination: Path) -> None:
         raise FileNotFoundError(f"SQLite 데이터베이스가 없습니다: {source}")
     if source.resolve() == destination.resolve():
         raise ValueError("원본과 대상은 서로 다른 경로여야 합니다.")
+
+
+def _env_int(name: str, default: int, *, minimum: int, maximum: int) -> int:
+    try:
+        value = int(os.getenv(name, str(default)))
+    except ValueError:
+        value = default
+    return max(minimum, min(value, maximum))
 
 
 def main() -> None:
