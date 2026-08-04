@@ -427,6 +427,25 @@ button.platform-filter-button.active {
   color: white;
 }
 
+.asset-card-list {
+  display: none;
+}
+
+.asset-cell-name,
+.asset-cell-symbol {
+  display: block;
+}
+
+.asset-cell-name {
+  font-weight: 700;
+}
+
+.asset-cell-symbol {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
 .collapsible-header {
   display: flex;
   align-items: center;
@@ -1258,6 +1277,40 @@ select {
     padding: 16px;
   }
 
+  #holdings .section-title {
+    align-items: center;
+    flex-direction: row;
+  }
+
+  #holdings .filters {
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    grid-template-columns: minmax(0, 1fr) minmax(128px, 0.8fr);
+    margin: 4px 0 12px;
+    padding: 8px 0;
+    background: var(--panel);
+  }
+
+  #holdings .platform-filter {
+    grid-column: 1 / -1;
+  }
+
+  #holdings .platform-filter-buttons {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    padding-bottom: 3px;
+    scrollbar-width: thin;
+  }
+
+  #holdings .platform-filter-button {
+    flex: 0 0 auto;
+  }
+
+  #holdings .filters > label {
+    min-width: 0;
+  }
+
   h2 {
     font-size: 22px;
   }
@@ -1299,6 +1352,161 @@ select {
     overflow: visible;
     border: 0;
     border-radius: 0;
+  }
+
+  #holdings .symbol-table {
+    display: none;
+  }
+
+  #holdings .asset-card-list {
+    display: grid;
+    gap: 8px;
+  }
+
+  .asset-card {
+    overflow: hidden;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    background: var(--panel);
+  }
+
+  .asset-card-summary {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto auto;
+    align-items: center;
+    gap: 8px;
+    min-height: 72px;
+    padding: 12px;
+    cursor: pointer;
+    list-style: none;
+  }
+
+  .asset-card-summary::-webkit-details-marker {
+    display: none;
+  }
+
+  .asset-card-identity,
+  .asset-card-primary {
+    min-width: 0;
+  }
+
+  .asset-card-heading {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+  }
+
+  .asset-card-heading strong {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 15px;
+  }
+
+  .asset-platform-label {
+    flex: 0 0 auto;
+    padding: 3px 6px;
+    border-radius: 999px;
+    background: #eef5f2;
+    color: var(--accent);
+    font-size: 10px;
+    font-weight: 800;
+  }
+
+  .asset-card-symbol {
+    display: block;
+    margin-top: 5px;
+    overflow: hidden;
+    color: var(--muted);
+    font-size: 12px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .asset-card-primary {
+    display: grid;
+    justify-items: end;
+    gap: 3px;
+    text-align: right;
+  }
+
+  .asset-card-primary > strong {
+    font-size: 15px;
+    white-space: nowrap;
+  }
+
+  .asset-card-primary > span {
+    font-size: 12px;
+    white-space: nowrap;
+  }
+
+  .asset-card-chevron {
+    display: inline-block;
+    color: var(--muted);
+    font-size: 18px;
+    line-height: 1;
+    transform: translateY(-1px);
+    transition: transform 160ms ease;
+  }
+
+  .asset-card[open] .asset-card-chevron {
+    transform: rotate(180deg) translateY(1px);
+  }
+
+  .asset-card-details {
+    padding: 0 12px 12px;
+  }
+
+  .asset-stat-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 6px;
+    padding-top: 10px;
+    border-top: 1px solid var(--line);
+  }
+
+  .asset-stat {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 7px 8px;
+    border-radius: 6px;
+    background: #f8fafc;
+  }
+
+  .asset-stat span {
+    color: var(--muted);
+    font-size: 11px;
+  }
+
+  .asset-stat strong {
+    min-width: 0;
+    overflow: hidden;
+    font-size: 12px;
+    text-align: right;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .asset-card-footer {
+    display: flex;
+    justify-content: flex-end;
+    margin-top: 8px;
+  }
+
+  .asset-card-footer .table-action {
+    min-width: 96px;
+  }
+
+  .asset-empty {
+    padding: 24px 12px;
+    border: 1px dashed var(--line);
+    border-radius: 8px;
+    color: var(--muted);
+    text-align: center;
   }
 
   .table table,

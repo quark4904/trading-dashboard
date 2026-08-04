@@ -263,6 +263,7 @@ function renderAssetTable() {
     ["플랫폼", "종목", "수량", "평균가", "현재가", "평가금액", "손익", "수익률", "관리"],
     symbolRows(items),
   );
+  document.querySelector("#symbolCards").innerHTML = assetCards(items);
 }
 
 function filteredAssets() {
@@ -301,7 +302,10 @@ function symbolRows(items) {
         (item) => `
         <tr>
           <td>${escapeHtml(platformLabel(item.platform))}</td>
-          <td><strong>${escapeHtml(assetName(item))}</strong><br />${escapeHtml(item.symbol)}</td>
+          <td>
+            <span class="asset-cell-name">${escapeHtml(assetName(item))}</span>
+            <span class="asset-cell-symbol">${escapeHtml(item.symbol)}</span>
+          </td>
           <td>${number.format(item.quantity)}</td>
           <td>${won.format(item.avg_price)}</td>
           <td>${won.format(item.current_price)}</td>
@@ -313,6 +317,44 @@ function symbolRows(items) {
       `,
       )
     : [`<tr><td colspan="9">표시할 일반 자산이 없습니다.</td></tr>`];
+}
+
+function assetCards(items) {
+  if (!items.length) {
+    return `<div class="asset-empty">표시할 일반 자산이 없습니다.</div>`;
+  }
+
+  return items
+    .map(
+      (item) => `
+      <details class="asset-card">
+        <summary class="asset-card-summary">
+          <div class="asset-card-identity">
+            <div class="asset-card-heading">
+              <span class="asset-platform-label">${escapeHtml(platformLabel(item.platform))}</span>
+              <strong>${escapeHtml(assetName(item))}</strong>
+            </div>
+            <span class="asset-card-symbol">${escapeHtml(item.symbol)}</span>
+          </div>
+          <div class="asset-card-primary">
+            <strong>${won.format(item.value)}</strong>
+            <span class="${pnlClass(item.pnl)}">${won.format(item.pnl)} · ${item.pnl_pct.toFixed(2)}%</span>
+          </div>
+          <span class="asset-card-chevron" aria-hidden="true">⌄</span>
+        </summary>
+        <div class="asset-card-details">
+          <div class="asset-stat-grid">
+            <div class="asset-stat"><span>수량</span><strong>${number.format(item.quantity)}</strong></div>
+            <div class="asset-stat"><span>상태</span><strong>${valuationLabel(item.valuation_status)}</strong></div>
+            <div class="asset-stat"><span>평균가</span><strong>${won.format(item.avg_price)}</strong></div>
+            <div class="asset-stat"><span>현재가</span><strong>${won.format(item.current_price)}</strong></div>
+          </div>
+          <div class="asset-card-footer">${aliasButton(item)}</div>
+        </div>
+      </details>
+    `,
+    )
+    .join("");
 }
 
 function assetName(item) {
