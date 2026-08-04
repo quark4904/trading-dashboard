@@ -12,7 +12,7 @@ const state = {
   strategies: [],
   editingStrategyId: null,
   summary: null,
-  syncStatus: { latest: [], history: [], api_keys: [] },
+  syncStatus: { latest: [], history: [], api_keys: [], alerts: [] },
   aliasTarget: null,
   assetFilters: {
     platform: "all",
@@ -830,6 +830,7 @@ function renderSyncDialog(syncStatus) {
   const latest = syncStatus?.latest ?? [];
   const history = syncStatus?.history ?? [];
   const apiKeys = syncStatus?.api_keys ?? [];
+  const alerts = syncStatus?.alerts ?? [];
   const health = syncHealth(latest);
   const completed = latest
     .map((item) => item.completed_at)
@@ -855,6 +856,23 @@ function renderSyncDialog(syncStatus) {
         )
         .join("")
     : `<div class="sync-empty">API 키 만료일 설정이 없습니다.</div>`;
+
+  document.querySelector("#syncAlerts").innerHTML = alerts.length
+    ? alerts
+        .map(
+          (item) => `
+            <article class="sync-alert-card ${escapeHtml(item.severity)}">
+              <div class="sync-alert-card-header">
+                <strong>${escapeHtml(alertSeverityLabel(item.severity))} · ${escapeHtml(item.platform || "전체")}</strong>
+                <button class="secondary compact-button" type="button" data-alert-id="${escapeHtml(item.id)}">확인 처리</button>
+              </div>
+              <p>${escapeHtml(item.message)}</p>
+              <small>${escapeHtml(formatSyncTime(new Date(item.updated_at)))} · ${number.format(item.occurrences || 1)}회</small>
+            </article>
+          `,
+        )
+        .join("")
+    : `<div class="sync-empty">확인하지 않은 장애 알림이 없습니다.</div>`;
 
   document.querySelector("#syncPlatformCards").innerHTML = latest.length
     ? latest
@@ -913,6 +931,14 @@ function syncStatusLabel(status) {
   }[status] ?? status;
 }
 
+function alertSeverityLabel(severity) {
+  return {
+    error: "오류",
+    warning: "주의",
+    info: "안내",
+  }[severity] ?? severity;
+}
+
 function syncRunTime(item) {
   const timestamp = item.completed_at || item.started_at;
   return timestamp ? formatSyncTime(new Date(timestamp)) : "시간 정보 없음";
@@ -969,6 +995,19 @@ document.addEventListener("click", (event) => {
   document.querySelector("#aliasDeleteButton").hidden = !state.aliasTarget.alias;
   document.querySelector("#aliasDialog").showModal();
   input.focus();
+});
+
+document.addEventListener("click", async (event) => {
+  const button = event.target.closest("[data-alert-id]");
+  if (!button) return;
+  button.disabled = true;
+  try {
+    await api(`/api/alerts/${encodeURIComponent(button.dataset.alertId)}?acknowledged=true`, { method: "PATCH" });
+    await refreshPortfolio({ force: true });
+  } catch (error) {
+    button.disabled = false;
+    document.querySelector("#syncMessage").textContent = `알림 확인 처리 실패: ${error.message}`;
+  }
 });
 
 document.querySelector("#aliasForm").addEventListener("submit", async (event) => {

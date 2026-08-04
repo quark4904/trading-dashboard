@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import io
 import json
 import os
 import sqlite3
@@ -10,11 +11,14 @@ import unittest
 from datetime import date, datetime
 from pathlib import Path
 from types import SimpleNamespace
+from urllib.error import HTTPError
+from urllib.request import Request
 from unittest.mock import MagicMock, patch
 
 from app.config import api_key_expirations
 from app.fee_policies import FeePolicyStore
 from app.integrations.fx import FxError, usd_krw_rate
+from app.integrations.http import RateLimiter, RetryPolicy, request_json
 from app.integrations.kis import KISClient
 from app.integrations.tossinvest import TossInvestClient
 from app.integrations.upbit import UpbitClient
@@ -220,6 +224,121 @@ class RepositoryTests(unittest.TestCase):
                 "estimated_total",
             }.issubset(columns)
         )
+
+
+class OperationalRepositoryTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.db_path = Path(self.temp_dir.name) / "dashboard.db"
+        self.repo = Repository(self.db_path)
+
+    def tearDown(self) -> None:
+        self.temp_dir.cleanup()
+
+    def test_schema_migration_history_is_recorded(self) -> None:
+        self.assertEqual(self.repo.schema_version(), 2)
+        self.assertEqual(
+            [item["name"] for item in self.repo.migration_history()],
+            ["baseline_existing_schema", "operational_locks_and_alerts"],
+        )
+
+    def test_platform_operation_lock_is_exclusive_and_releasable(self) -> None:
+        self.assertEqual(
+            self.repo.acquire_operation_lock("platform:upbit:operation", "owner-1"),
+            "owner-1",
+        )
+        self.assertIsNone(self.repo.acquire_operation_lock("platform:upbit:operation", "owner-2"))
+        self.assertEqual(len(self.repo.operation_locks()), 1)
+        self.assertTrue(self.repo.release_operation_lock("platform:upbit:operation", "owner-1"))
+        self.assertEqual(
+            self.repo.acquire_operation_lock("platform:upbit:operation", "owner-2"),
+            "owner-2",
+        )
+
+    def test_alerts_are_deduplicated_until_acknowledged(self) -> None:
+        first = self.repo.record_alert(
+            severity="error",
+            category="sync_failure",
+            platform="upbit",
+            message="일시 장애",
+            dedupe_key="sync-failure:upbit",
+        )
+        second = self.repo.record_alert(
+            severity="error",
+            category="sync_failure",
+            platform="upbit",
+            message="일시 장애 재발",
+            dedupe_key="sync-failure:upbit",
+        )
+
+        self.assertEqual(first["id"], second["id"])
+        self.assertEqual(second["occurrences"], 2)
+        self.assertEqual(self.repo.unresolved_alert_count(), 1)
+        self.assertEqual(len(self.repo.alerts()), 1)
+        acknowledged = self.repo.acknowledge_alert(first["id"])
+        self.assertIsNotNone(acknowledged["acknowledged_at"])
+        self.assertEqual(self.repo.unresolved_alert_count(), 0)
+
+    def test_stale_running_sync_is_recovered_on_repository_start(self) -> None:
+        sync_id = self.repo.start_sync("upbit")
+        with self.repo.connect() as conn:
+            conn.execute(
+                "UPDATE sync_runs SET started_at = ? WHERE id = ?",
+                ("2000-01-01T00:00:00+00:00", sync_id),
+            )
+
+        Repository(self.db_path)
+
+        latest = self.repo.latest_sync_runs()[0]
+        self.assertEqual(latest["status"], "failed")
+        self.assertEqual(latest["error"], "프로세스 재시작 후 중단된 동기화입니다.")
+        self.assertEqual(self.repo.alerts()[0]["category"], "stale_run_recovered")
+
+
+class ExternalHTTPResilienceTests(unittest.TestCase):
+    def test_transient_http_failure_retries_with_retry_after(self) -> None:
+        response = MagicMock()
+        response.__enter__.return_value = response
+        response.read.return_value = b'{"ok": true}'
+        response.headers = {}
+        transient = HTTPError(
+            "https://example.test",
+            503,
+            "temporarily unavailable",
+            {"Retry-After": "0"},
+            io.BytesIO(b"temporarily unavailable"),
+        )
+        opener = MagicMock(side_effect=[transient, response])
+        sleeper = MagicMock()
+
+        data, _ = request_json(
+            Request("https://example.test", method="GET"),
+            provider="test",
+            opener=opener,
+            policy=RetryPolicy(max_attempts=2, backoff_seconds=0, max_backoff_seconds=0, min_interval_seconds=0),
+            limiter=RateLimiter(0),
+            sleep_fn=sleeper,
+        )
+
+        self.assertEqual(data, {"ok": True})
+        self.assertEqual(opener.call_count, 2)
+        sleeper.assert_not_called()
+        transient.close()
+
+    def test_non_idempotent_request_is_not_retried_by_default(self) -> None:
+        opener = MagicMock(side_effect=OSError("offline"))
+
+        with self.assertRaises(RuntimeError):
+            request_json(
+                Request("https://example.test", data=b"{}", method="POST"),
+                provider="test-post",
+                opener=opener,
+                policy=RetryPolicy(max_attempts=3, min_interval_seconds=0),
+                limiter=RateLimiter(0),
+                sleep_fn=MagicMock(),
+            )
+
+        self.assertEqual(opener.call_count, 1)
 
 
 class ApiKeyExpirationTests(unittest.TestCase):
@@ -894,6 +1013,15 @@ class StrategyRunTests(unittest.TestCase):
         request = json.loads(history[0]["orders"][0]["request_json"])
         self.assertEqual(request["idempotency_key"], history[0]["orders"][0]["idempotency_key"])
 
+    def test_strategy_execution_is_skipped_when_platform_is_locked(self) -> None:
+        self.repo.acquire_operation_lock("platform:upbit:operation", "another-worker")
+
+        result = self.service.run_dca_strategy_now(self.strategy["id"])
+
+        self.assertEqual(result["status"], "busy")
+        self.assertEqual(self.repo.strategy_runs(), [])
+        self.assertEqual(self.repo.alerts()[0]["category"], "operation_lock")
+
     def test_preflight_failure_is_recorded_without_a_dry_run_order(self) -> None:
         preflight = MagicMock(return_value={"error": "종목 조회 실패"})
         service = TradingService(
@@ -1180,6 +1308,16 @@ class SyncIsolationTests(unittest.TestCase):
         latest = self.repo.latest_sync_runs()[0]
         self.assertEqual(latest["status"], "failed")
         self.assertEqual(latest["error"], "temporary failure")
+        self.assertEqual(self.repo.alerts()[0]["category"], "sync_failure")
+
+    def test_sync_is_skipped_when_platform_operation_is_locked(self) -> None:
+        self.repo.acquire_operation_lock("platform:upbit:operation", "another-worker")
+
+        result = self.service._run_sync("upbit", lambda: {"synced_count": 1})
+
+        self.assertEqual(result["status"], "busy")
+        self.assertEqual(self.repo.recent_sync_runs(), [])
+        self.assertEqual(self.repo.alerts()[0]["category"], "operation_lock")
 
     def test_kis_accounts_sync_independently(self) -> None:
         accounts = [
@@ -1201,6 +1339,100 @@ class SyncIsolationTests(unittest.TestCase):
         self.assertEqual(result["status"], "partial")
         self.assertFalse(result["ok"])
         self.assertEqual([item["status"] for item in result["results"]], ["failed", "success"])
+
+
+class MaintenanceTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp_dir.name)
+        self.db_path = self.root / "dashboard.db"
+        self.repo = Repository(self.db_path)
+        self.repo.create_strategy(
+            {
+                "name": "백업 테스트",
+                "strategy_type": "custom",
+                "enabled": False,
+                "platform": "",
+                "symbol": "",
+                "budget": 0,
+                "params": {},
+            }
+        )
+
+    def tearDown(self) -> None:
+        self.temp_dir.cleanup()
+
+    def test_backup_restore_and_integrity_check(self) -> None:
+        from app.maintenance import backup_database, integrity_check, restore_database
+
+        backup_path = self.root / "backups" / "dashboard-backup.db"
+        restored_path = self.root / "restored.db"
+        backup_result = backup_database(self.db_path, backup_path)
+        restore_result = restore_database(backup_path, restored_path)
+
+        self.assertTrue(backup_result["integrity"]["ok"])
+        self.assertTrue(restore_result["integrity"]["ok"])
+        self.assertTrue(integrity_check(restored_path)["ok"])
+        self.assertEqual(len(Repository(restored_path).strategies()), 1)
+
+
+class HTTPApiIntegrationTests(unittest.TestCase):
+    def setUp(self) -> None:
+        from app.main import Handler
+
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.repo = Repository(Path(self.temp_dir.name) / "dashboard.db")
+        self.service = TradingService(self.repo)
+        self.handler_class = Handler
+
+    def tearDown(self) -> None:
+        self.temp_dir.cleanup()
+
+    def request(self, method: str, path: str, payload: dict | None = None) -> tuple[int, dict | list]:
+        handler = self.handler_class.__new__(self.handler_class)
+        handler.path = path
+        handler.server = SimpleNamespace(repository=self.repo, trading_service=self.service)
+        handler.wfile = io.BytesIO()
+        response_status = {}
+        handler.send_response = lambda status: response_status.setdefault("status", status)
+        handler.send_header = lambda *_args: None
+        handler.end_headers = lambda: None
+        handler.read_json = lambda: payload or {}
+        getattr(self.handler_class, f"do_{method}")(handler)
+        return response_status["status"], json.loads(handler.wfile.getvalue().decode("utf-8"))
+
+    def test_health_strategy_and_alert_endpoints(self) -> None:
+        status, health = self.request("GET", "/api/health")
+        self.assertEqual(status, 200)
+        self.assertEqual(health["mode"], "dry_run")
+        self.assertEqual(health["active_alerts"], 0)
+
+        status, created = self.request(
+            "POST",
+            "/api/strategies",
+            {
+                "name": "HTTP DCA",
+                "strategy_type": "dca",
+                "platform": "upbit",
+                "params": {"items": [{"symbol": "KRW-BTC", "value": 5000}]},
+            },
+        )
+        self.assertEqual(status, 201)
+        self.assertEqual(created["strategy_type"], "dca")
+
+        self.repo.record_alert(
+            severity="error",
+            category="test",
+            message="테스트 알림",
+            dedupe_key="test-alert",
+        )
+        status, alerts = self.request("GET", "/api/alerts")
+        self.assertEqual(status, 200)
+        self.assertEqual(alerts[0]["message"], "테스트 알림")
+
+        status, acknowledged = self.request("PATCH", f"/api/alerts/{alerts[0]['id']}?acknowledged=true")
+        self.assertEqual(status, 200)
+        self.assertIsNotNone(acknowledged["acknowledged_at"])
 
 
 if __name__ == "__main__":

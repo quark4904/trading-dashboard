@@ -5,11 +5,11 @@ import os
 import time
 from dataclasses import dataclass
 from typing import Any
-from urllib.error import HTTPError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from app.config import load_env
+from app.integrations.http import HTTPTransportError, request_json, retry_policy
 
 
 class KISError(RuntimeError):
@@ -33,6 +33,7 @@ class KISClient:
         self.account = account
         self.is_paper = os.getenv("KIS_IS_PAPER", "false").lower() == "true"
         self.base_url = "https://openapivts.koreainvestment.com:29443" if self.is_paper else "https://openapi.koreainvestment.com:9443"
+        self._retry_policy = retry_policy("kis", timeout_seconds=12)
         if not account.app_key or not account.app_secret or not account.account_no or not account.product_code:
             raise KISError(f"{account.platform} 한국투자증권 설정값이 부족합니다.")
 
@@ -167,17 +168,18 @@ class KISClient:
         include_response_headers: bool = False,
     ) -> dict[str, Any]:
         try:
-            with urlopen(Request(url or f"{self.base_url}{path}", data=body, headers=headers or {}, method=method), timeout=12) as response:
-                data = json.loads(response.read().decode("utf-8"))
-                if include_response_headers:
-                    data["_response_headers"] = {
-                        key.lower(): value for key, value in response.headers.items()
-                    }
-                return data
-        except HTTPError as exc:
-            body_text = exc.read().decode("utf-8", errors="replace")
-            raise KISError(f"{self.account.platform} KIS API {exc.code}: {body_text}") from exc
-        except OSError as exc:
+            data, response_headers = request_json(
+                Request(url or f"{self.base_url}{path}", data=body, headers=headers or {}, method=method),
+                provider="kis",
+                opener=urlopen,
+                policy=getattr(self, "_retry_policy", retry_policy("kis", timeout_seconds=12)),
+            )
+            if include_response_headers:
+                data["_response_headers"] = response_headers
+            return data
+        except HTTPTransportError as exc:
+            if exc.status is not None:
+                raise KISError(f"{self.account.platform} KIS API {exc.status}: {exc.body[:4000]}") from exc
             raise KISError(f"{self.account.platform} KIS API 연결 실패: {exc}") from exc
 
 

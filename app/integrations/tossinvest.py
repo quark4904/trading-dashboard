@@ -1,15 +1,14 @@
 from __future__ import annotations
 
 import base64
-import json
 import os
 import time
 from typing import Any
-from urllib.error import HTTPError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from app.config import load_env
+from app.integrations.http import HTTPTransportError, request_json, retry_policy
 
 
 class TossInvestError(RuntimeError):
@@ -25,6 +24,7 @@ class TossInvestClient:
         self.account_seq = os.getenv("TOSSINVEST_ACCOUNT_SEQ", "")
         self._access_token = ""
         self._token_expires_at = 0.0
+        self._retry_policy = retry_policy("toss", timeout_seconds=12)
         if not self.client_id or not self.client_secret or not self.account_seq:
             raise TossInvestError("토스증권 설정값이 부족합니다.")
 
@@ -106,10 +106,14 @@ class TossInvestClient:
         auth: bool = True,
     ) -> dict[str, Any]:
         try:
-            with urlopen(Request(f"{self.base_url}{path}", data=body, headers=headers or {}, method=method), timeout=12) as response:
-                return json.loads(response.read().decode("utf-8"))
-        except HTTPError as exc:
-            body_text = exc.read().decode("utf-8", errors="replace")
-            raise TossInvestError(f"토스증권 API {exc.code}: {body_text}") from exc
-        except OSError as exc:
+            data, _ = request_json(
+                Request(f"{self.base_url}{path}", data=body, headers=headers or {}, method=method),
+                provider="toss",
+                opener=urlopen,
+                policy=getattr(self, "_retry_policy", retry_policy("toss", timeout_seconds=12)),
+            )
+            return data
+        except HTTPTransportError as exc:
+            if exc.status is not None:
+                raise TossInvestError(f"토스증권 API {exc.status}: {exc.body[:4000]}") from exc
             raise TossInvestError(f"토스증권 API 연결 실패: {exc}") from exc

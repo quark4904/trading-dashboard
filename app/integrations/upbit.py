@@ -7,11 +7,11 @@ import json
 import os
 import uuid
 from typing import Any
-from urllib.error import HTTPError
 from urllib.parse import unquote, urlencode
 from urllib.request import Request, urlopen
 
 from app.config import load_env
+from app.integrations.http import HTTPTransportError, request_json, retry_policy
 
 
 class UpbitError(RuntimeError):
@@ -25,6 +25,7 @@ class UpbitClient:
         load_env()
         self.access_key = os.getenv("UPBIT_ACCESS_KEY", "")
         self.secret_key = os.getenv("UPBIT_SECRET_KEY", "")
+        self._retry_policy = retry_policy("upbit", timeout_seconds=12)
         if not self.access_key or not self.secret_key:
             raise UpbitError("UPBIT_ACCESS_KEY 또는 UPBIT_SECRET_KEY가 없습니다.")
 
@@ -78,12 +79,16 @@ class UpbitClient:
             headers["Authorization"] = f"Bearer {self._jwt(query)}"
 
         try:
-            with urlopen(Request(url, headers=headers, method=method), timeout=12) as response:
-                return json.loads(response.read().decode("utf-8"))
-        except HTTPError as exc:
-            body = exc.read().decode("utf-8", errors="replace")
-            raise UpbitError(f"Upbit API {exc.code}: {body}") from exc
-        except OSError as exc:
+            data, _ = request_json(
+                Request(url, headers=headers, method=method),
+                provider="upbit",
+                opener=urlopen,
+                policy=getattr(self, "_retry_policy", retry_policy("upbit", timeout_seconds=12)),
+            )
+            return data
+        except HTTPTransportError as exc:
+            if exc.status is not None:
+                raise UpbitError(f"Upbit API {exc.status}: {exc.body[:4000]}") from exc
             raise UpbitError(f"Upbit API 연결 실패: {exc}") from exc
 
     def _jwt(self, query: str = "") -> str:

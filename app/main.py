@@ -19,8 +19,35 @@ repo = Repository()
 service = TradingService(repo)
 
 
+class DashboardHTTPServer(ThreadingHTTPServer):
+    def __init__(self, server_address, handler_class, repository: Repository, trading_service: TradingService):
+        super().__init__(server_address, handler_class)
+        self.repository = repository
+        self.trading_service = trading_service
+
+
+def create_server(
+    host: str = "127.0.0.1",
+    port: int = 8765,
+    *,
+    repository: Repository | None = None,
+    trading_service: TradingService | None = None,
+) -> DashboardHTTPServer:
+    repository = repository or Repository()
+    trading_service = trading_service or TradingService(repository)
+    return DashboardHTTPServer((host, port), Handler, repository, trading_service)
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "TradingDashboardMVP/0.1"
+
+    @property
+    def repository(self) -> Repository:
+        return self.server.repository
+
+    @property
+    def trading_service(self) -> TradingService:
+        return self.server.trading_service
 
     def do_HEAD(self) -> None:
         parsed = urlparse(self.path)
@@ -38,31 +65,49 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
         if parsed.path == "/api/health":
-            return self.json_response({"ok": True, "mode": "dry_run"})
+            return self.json_response(
+                {
+                    "ok": True,
+                    "mode": "dry_run",
+                    "active_alerts": self.repository.unresolved_alert_count(),
+                }
+            )
         if parsed.path == "/api/platforms":
-            return self.json_response(service.platforms())
+            return self.json_response(self.trading_service.platforms())
         if parsed.path == "/api/portfolio/summary":
-            return self.json_response(service.portfolio_summary())
+            return self.json_response(self.trading_service.portfolio_summary())
         if parsed.path == "/api/sync/status":
             return self.json_response(
                 {
-                    "latest": repo.latest_sync_runs(),
-                    "history": repo.recent_sync_runs(),
+                    "latest": self.repository.latest_sync_runs(),
+                    "history": self.repository.recent_sync_runs(),
                     "api_keys": api_key_expirations(),
+                    "alerts": self.repository.alerts(),
+                    "locks": self.repository.operation_locks(),
+                }
+            )
+        if parsed.path == "/api/alerts":
+            include_acknowledged = parse_qs(parsed.query).get("include_acknowledged", ["false"])[0].lower() == "true"
+            return self.json_response(self.repository.alerts(include_acknowledged=include_acknowledged))
+        if parsed.path == "/api/maintenance/migrations":
+            return self.json_response(
+                {
+                    "schema_version": self.repository.schema_version(),
+                    "history": self.repository.migration_history(),
                 }
             )
         if parsed.path == "/api/orders":
-            return self.json_response(repo.orders())
+            return self.json_response(self.repository.orders())
         if parsed.path == "/api/executions":
-            return self.json_response(repo.executions())
+            return self.json_response(self.repository.executions())
         if parsed.path == "/api/strategy-runs":
-            return self.json_response(repo.strategy_runs())
+            return self.json_response(self.repository.strategy_runs())
         if parsed.path == "/api/strategies":
-            return self.json_response(repo.strategies())
+            return self.json_response(self.repository.strategies())
         if parsed.path == "/api/strategy-capabilities":
             return self.json_response(strategy_capabilities())
         if parsed.path == "/api/asset-aliases":
-            return self.json_response(repo.asset_aliases())
+            return self.json_response(self.repository.asset_aliases())
         return self.static_response(parsed.path)
 
     def do_POST(self) -> None:
@@ -74,40 +119,55 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/orders":
             return self.json_response({"error": "수동 주문은 지원하지 않습니다. 전략 실행 엔진에서만 주문 기록을 생성합니다."}, status=405)
         if parsed.path == "/api/strategy-runs/execute-due":
-            return self.json_response(service.run_due_dca_strategies())
+            return self.json_response(self.trading_service.run_due_dca_strategies())
         if parsed.path.startswith("/api/strategies/") and parsed.path.endswith("/dry-run"):
             parts = parsed.path.strip("/").split("/")
             try:
                 strategy_id = int(parts[2])
-                result = service.run_dca_strategy_now(strategy_id)
+                result = self.trading_service.run_dca_strategy_now(strategy_id)
             except (IndexError, ValueError) as exc:
                 return self.json_response({"error": str(exc)}, status=400)
             status = 201 if result.get("status") == "success" else 422
             payload = result if status == 201 else {"error": result.get("error") or "주문 전 검증에 실패했습니다.", "run": result}
             return self.json_response(payload, status=status)
         if parsed.path == "/api/sync/upbit":
-            result = service.sync_upbit_holdings()
+            result = self.trading_service.sync_upbit_holdings()
             return self.json_response(result, status=sync_http_status(result))
         if parsed.path == "/api/sync/kis":
-            result = service.sync_kis_holdings()
+            result = self.trading_service.sync_kis_holdings()
             return self.json_response(result, status=sync_http_status(result))
         if parsed.path == "/api/sync/toss":
-            result = service.sync_toss_holdings()
+            result = self.trading_service.sync_toss_holdings()
             return self.json_response(result, status=sync_http_status(result))
         if parsed.path == "/api/sync/all":
-            result = service.sync_all_holdings()
+            result = self.trading_service.sync_all_holdings()
             return self.json_response(result, status=sync_http_status(result))
         if parsed.path == "/api/strategies":
             try:
                 request = validate_strategy(data)
             except ValueError as exc:
                 return self.json_response({"error": str(exc)}, status=400)
-            created = repo.create_strategy(request)
+            created = self.repository.create_strategy(request)
             return self.json_response(created, status=201)
         return self.json_response({"error": "not found"}, status=404)
 
     def do_PATCH(self) -> None:
         parsed = urlparse(self.path)
+        if parsed.path.startswith("/api/alerts/"):
+            parts = parsed.path.strip("/").split("/")
+            if len(parts) != 3 or parts[1] != "alerts":
+                return self.json_response({"error": "not found"}, status=404)
+            try:
+                alert_id = int(parts[2])
+            except ValueError:
+                return self.json_response({"error": "잘못된 알림 ID입니다."}, status=400)
+            acknowledged = parse_qs(parsed.query).get("acknowledged", ["true"])[0].lower() == "true"
+            if not acknowledged:
+                return self.json_response({"error": "알림은 확인 처리만 지원합니다."}, status=400)
+            item = self.repository.acknowledge_alert(alert_id)
+            if not item:
+                return self.json_response({"error": "not found"}, status=404)
+            return self.json_response(item)
         if parsed.path.startswith("/api/strategies/") and parsed.path.endswith("/enabled"):
             parts = parsed.path.strip("/").split("/")
             try:
@@ -115,7 +175,7 @@ class Handler(BaseHTTPRequestHandler):
             except (IndexError, ValueError):
                 return self.json_response({"error": "잘못된 전략 ID입니다."}, status=400)
             enabled = parse_qs(parsed.query).get("value", ["false"])[0].lower() == "true"
-            item = repo.set_strategy_enabled(strategy_id, enabled)
+            item = self.repository.set_strategy_enabled(strategy_id, enabled)
             if not item:
                 return self.json_response({"error": "not found"}, status=404)
             return self.json_response(item)
@@ -132,7 +192,7 @@ class Handler(BaseHTTPRequestHandler):
                 request = validate_strategy(self.read_json())
             except ValueError as exc:
                 return self.json_response({"error": str(exc)}, status=400)
-            updated = repo.update_strategy(strategy_id, request)
+            updated = self.repository.update_strategy(strategy_id, request)
             if not updated:
                 return self.json_response({"error": "not found"}, status=404)
             return self.json_response(updated)
@@ -156,7 +216,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.json_response({"error": "지원하지 않는 플랫폼입니다."}, status=400)
         if len(symbol) > 50:
             return self.json_response({"error": "종목 코드는 50자 이하여야 합니다."}, status=400)
-        return self.json_response(repo.set_asset_alias(platform, symbol, alias))
+        return self.json_response(self.repository.set_asset_alias(platform, symbol, alias))
 
     def do_DELETE(self) -> None:
         parsed = urlparse(self.path)
@@ -168,7 +228,7 @@ class Handler(BaseHTTPRequestHandler):
                 strategy_id = int(parts[2])
             except ValueError:
                 return self.json_response({"error": "잘못된 전략 ID입니다."}, status=400)
-            if not repo.delete_strategy(strategy_id):
+            if not self.repository.delete_strategy(strategy_id):
                 return self.json_response({"error": "not found"}, status=404)
             return self.json_response({"deleted": True})
 
@@ -178,7 +238,7 @@ class Handler(BaseHTTPRequestHandler):
         platform, symbol = alias_target
         if platform not in {item.code for item in platform_configs()}:
             return self.json_response({"error": "지원하지 않는 플랫폼입니다."}, status=400)
-        return self.json_response({"deleted": repo.delete_asset_alias(platform, symbol)})
+        return self.json_response({"deleted": self.repository.delete_asset_alias(platform, symbol)})
 
     def read_json(self) -> dict:
         try:
@@ -226,7 +286,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def run(host: str = "127.0.0.1", port: int = 8765) -> None:
-    server = ThreadingHTTPServer((host, port), Handler)
+    server = create_server(host, port, repository=repo, trading_service=service)
     scheduler = StrategyScheduler(service)
     scheduler.start()
     print(f"Trading dashboard MVP running at http://{host}:{port}")
@@ -241,6 +301,8 @@ def sync_http_status(result: dict) -> int:
         return 200
     if result.get("status") == "partial":
         return 207
+    if result.get("status") == "busy":
+        return 409
     return 502
 
 

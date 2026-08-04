@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-import json
 import os
 from typing import TYPE_CHECKING, Any, Protocol
 from urllib.request import Request, urlopen
+
+from app.integrations.http import HTTPTransportError, request_json, retry_policy
 
 if TYPE_CHECKING:
     from app.repository import Repository
@@ -51,8 +52,12 @@ def usd_krw_rate(repo: "Repository", toss_client: TossFxClient | None = None) ->
 
     try:
         req = Request("https://open.er-api.com/v6/latest/USD", headers={"Accept": "application/json"})
-        with urlopen(req, timeout=8) as response:
-            data = json.loads(response.read().decode("utf-8"))
+        data, _ = request_json(
+            req,
+            provider="fx",
+            opener=urlopen,
+            policy=retry_policy("fx", timeout_seconds=8),
+        )
         rate = _to_float((data.get("rates") or {}).get("KRW"))
         if rate <= 0:
             raise FxError("환율 API 응답에 USD/KRW 값이 없습니다.")
@@ -66,7 +71,7 @@ def usd_krw_rate(repo: "Repository", toss_client: TossFxClient | None = None) ->
                 "provider_next_update_at": data.get("time_next_update_utc"),
             },
         )
-    except (OSError, ValueError, FxError) as exc:
+    except (HTTPTransportError, OSError, ValueError, FxError) as exc:
         errors.append(f"ER-API: {exc}")
         cached = repo.latest_successful_exchange_rate()
         error = " / ".join(errors)

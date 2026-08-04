@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import defaultdict
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Any, Callable
+from uuid import uuid4
 
 from app.config import execution_history_days, platform_configs
 from app.fee_policies import FeePolicyStore
@@ -28,6 +29,7 @@ from app.strategy_capabilities import compile_dca_buy_request, dca_market_capabi
 
 
 DUST_VALUE_THRESHOLD = 100
+OPERATION_LOCK_LEASE_SECONDS = 300
 
 
 class TradingService:
@@ -424,6 +426,50 @@ class TradingService:
         schedule_key: str | None,
         now: datetime | None = None,
     ) -> dict[str, Any] | None:
+        platform = str(strategy.get("platform") or "unknown")
+        lock_name = f"platform:{platform}:operation"
+        owner = f"order:{uuid4().hex}"
+        lock_owner = self.repo.acquire_operation_lock(
+            lock_name,
+            owner,
+            lease_seconds=OPERATION_LOCK_LEASE_SECONDS,
+        )
+        if lock_owner is None:
+            message = f"{platform} 플랫폼의 다른 동기화 또는 주문 실행이 진행 중입니다."
+            self.repo.record_alert(
+                severity="warning",
+                category="operation_lock",
+                platform=platform,
+                message=message,
+                details={"strategy_id": strategy.get("id"), "trigger": trigger},
+                dedupe_key=f"operation-lock:{platform}",
+            )
+            return {
+                "status": "busy",
+                "ok": False,
+                "error": message,
+                "strategy_id": strategy.get("id"),
+                "trigger": trigger,
+            }
+
+        try:
+            return self._run_dca_strategy_locked(
+                strategy,
+                trigger=trigger,
+                schedule_key=schedule_key,
+                now=now,
+            )
+        finally:
+            self.repo.release_operation_lock(lock_name, lock_owner)
+
+    def _run_dca_strategy_locked(
+        self,
+        strategy: dict[str, Any],
+        *,
+        trigger: str,
+        schedule_key: str | None,
+        now: datetime | None = None,
+    ) -> dict[str, Any] | None:
         run = self.repo.start_strategy_run(strategy["id"], trigger, schedule_key)
         if not run:
             return None
@@ -465,14 +511,14 @@ class TradingService:
                     plan["risk"]["status"] = "rejected"
                     plan["risk"]["errors"] = _unique_strings(plan["risk"]["errors"] + errors)
                     plan["request"]["risk"] = plan["risk"]
-                    self.repo.create_order(
-                        plan["request"],
-                        status="risk_rejected",
-                        reason=f"주문 전 검증 실패: {'; '.join(plan['risk']['errors'])}",
-                        strategy_run_id=run["id"],
-                        idempotency_key=plan["idempotency_key"],
-                        cancellation_policy=CANCELLATION_POLICY,
-                    )
+                self.repo.create_orders(
+                    [plan["request"] for plan in plans],
+                    status="risk_rejected",
+                    reason=f"주문 전 검증 실패: {'; '.join(errors)}",
+                    strategy_run_id=run["id"],
+                    idempotency_keys=[plan["idempotency_key"] for plan in plans],
+                    cancellation_policy=CANCELLATION_POLICY,
+                )
                 return self.repo.finish_strategy_run(
                     run["id"],
                     status="failed",
@@ -480,17 +526,24 @@ class TradingService:
                     error=f"주문 전 검증 실패: {'; '.join(errors)}",
                 )
 
-            for plan in plans:
-                self.repo.create_order(
-                    plan["request"],
-                    status="dry_run",
-                    reason="DRY_RUN: 실제 주문을 전송하지 않았습니다.",
-                    strategy_run_id=run["id"],
-                    idempotency_key=plan["idempotency_key"],
-                    cancellation_policy=CANCELLATION_POLICY,
-                )
+            self.repo.create_orders(
+                [plan["request"] for plan in plans],
+                status="dry_run",
+                reason="DRY_RUN: 실제 주문을 전송하지 않았습니다.",
+                strategy_run_id=run["id"],
+                idempotency_keys=[plan["idempotency_key"] for plan in plans],
+                cancellation_policy=CANCELLATION_POLICY,
+            )
             return self.repo.finish_strategy_run(run["id"], status="success", order_count=len(plans))
         except Exception as exc:
+            self.repo.record_alert(
+                severity="error",
+                category="strategy_execution",
+                platform=strategy.get("platform") or None,
+                message=f"전략 실행 실패: {exc}",
+                details={"strategy_id": strategy.get("id"), "run_id": run["id"]},
+                dedupe_key=f"strategy-execution:{strategy.get('id')}",
+            )
             return self.repo.finish_strategy_run(run["id"], status="failed", error=str(exc))
 
     def _build_dca_order_plan(
@@ -938,35 +991,70 @@ class TradingService:
             return {"error": str(exc)}
 
     def _run_sync(self, platform: str, sync: Callable[[], dict[str, Any]]) -> dict[str, Any]:
-        sync_id = self.repo.start_sync(platform)
-        try:
-            result = sync()
-        except Exception as exc:
-            run = self.repo.finish_sync(sync_id, status="failed", error=str(exc))
+        lock_name = f"platform:{platform}:operation"
+        owner = f"sync:{uuid4().hex}"
+        lock_owner = self.repo.acquire_operation_lock(
+            lock_name,
+            owner,
+            lease_seconds=OPERATION_LOCK_LEASE_SECONDS,
+        )
+        if lock_owner is None:
+            message = f"{platform} 플랫폼의 다른 동기화 또는 주문 실행이 진행 중입니다."
+            self.repo.record_alert(
+                severity="warning",
+                category="operation_lock",
+                platform=platform,
+                message=message,
+                details={"operation": "sync"},
+                dedupe_key=f"operation-lock:{platform}",
+            )
             return {
                 "platform": platform,
                 "ok": False,
-                "status": "failed",
-                "error": str(exc),
+                "status": "busy",
+                "error": message,
+            }
+
+        try:
+            sync_id = self.repo.start_sync(platform)
+            try:
+                result = sync()
+            except Exception as exc:
+                run = self.repo.finish_sync(sync_id, status="failed", error=str(exc))
+                self.repo.record_alert(
+                    severity="error",
+                    category="sync_failure",
+                    platform=platform,
+                    message=f"{platform} 동기화 실패: {exc}",
+                    details={"sync_id": sync_id},
+                    dedupe_key=f"sync-failure:{platform}",
+                )
+                return {
+                    "platform": platform,
+                    "ok": False,
+                    "status": "failed",
+                    "error": str(exc),
+                    "started_at": run["started_at"],
+                    "completed_at": run["completed_at"],
+                }
+
+            count = int(result.get("synced_count", 0))
+            execution_count = int(result.get("execution_count", 0))
+            run = self.repo.finish_sync(
+                sync_id,
+                status="success",
+                synced_count=count,
+                execution_count=execution_count,
+            )
+            return {
+                **result,
+                "ok": True,
+                "status": "success",
                 "started_at": run["started_at"],
                 "completed_at": run["completed_at"],
             }
-
-        count = int(result.get("synced_count", 0))
-        execution_count = int(result.get("execution_count", 0))
-        run = self.repo.finish_sync(
-            sync_id,
-            status="success",
-            synced_count=count,
-            execution_count=execution_count,
-        )
-        return {
-            **result,
-            "ok": True,
-            "status": "success",
-            "started_at": run["started_at"],
-            "completed_at": run["completed_at"],
-        }
+        finally:
+            self.repo.release_operation_lock(lock_name, lock_owner)
 
 
 def _group_sync_results(results: list[dict[str, Any]]) -> dict[str, Any]:

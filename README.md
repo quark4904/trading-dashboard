@@ -85,6 +85,10 @@ docker compose down
 - 주문 전 플랫폼 현금·최소 금액·거래시간·종목 가능 여부 검증
 - 전략별 일일 예산·최대 주문 횟수 제한과 검증 실패 이력 저장
 - 주문별 멱등성 키와 사전 거부 취소 정책 기록
+- 외부 API 재시도·지수 백오프·호출 간격 제한
+- 플랫폼별 동기화·전략 실행 lease 잠금과 운영 장애 알림
+- SQLite Online Backup 기반 백업·복구 및 스키마 마이그레이션 이력
+- HTTP API 라우팅·외부 API 재시도 mock 테스트
 
 플랫폼별 주문 필드와 공식 자료 근거는
 [`docs/platform-order-requirements.md`](docs/platform-order-requirements.md)에 정리되어 있습니다.
@@ -164,6 +168,8 @@ KIS_ISA_KEY_EXPIRES_ON=2027-01-01
 
 ## 다음 단계
 
-1. 외부 API 재시도·백오프와 동기화/주문 실행 잠금
-2. 백테스트와 모의매매
-3. FastAPI + React 전환
+1. 대시보드 인증 및 권한 분리
+2. HTTPS 리버스 프록시와 외부 접근 제어
+3. 비밀값 관리 방식 정리 및 `.env.example` 제공
+4. 백테스트와 모의매매
+5. FastAPI + React 전환

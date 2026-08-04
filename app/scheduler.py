@@ -74,4 +74,11 @@ class StrategyScheduler:
                 self.service.run_due_dca_strategies()
             except Exception as exc:  # Keep the dashboard server alive if a scheduler cycle fails.
                 print(f"Strategy scheduler failed: {exc}")
+                self.service.repo.record_alert(
+                    severity="error",
+                    category="scheduler_failure",
+                    message=f"스케줄러 실행 실패: {exc}",
+                    details={"component": "strategy-scheduler"},
+                    dedupe_key="scheduler-failure",
+                )
             self._stop.wait(self.interval_seconds)

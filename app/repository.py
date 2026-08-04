@@ -2,13 +2,17 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import uuid
 from contextlib import contextmanager
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator
 from zoneinfo import ZoneInfo
 
 from app.config import DB_PATH, env_flag
+
+
+SCHEMA_VERSION = 2
 
 
 def utc_now() -> str:
@@ -23,8 +27,9 @@ class Repository:
 
     @contextmanager
     def connect(self) -> Iterator[sqlite3.Connection]:
-        conn = sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(self.db_path, timeout=30)
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA busy_timeout = 30000")
         try:
             with conn:
                 yield conn
@@ -33,8 +38,15 @@ class Repository:
 
     def _init_db(self) -> None:
         with self.connect() as conn:
+            conn.execute("PRAGMA journal_mode = WAL")
             conn.executescript(
                 """
+                CREATE TABLE IF NOT EXISTS schema_migrations (
+                    version INTEGER PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    applied_at TEXT NOT NULL
+                );
+
                 CREATE TABLE IF NOT EXISTS holdings (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     platform TEXT NOT NULL,
@@ -155,6 +167,27 @@ class Repository:
                     error TEXT,
                     details_json TEXT NOT NULL DEFAULT '{}'
                 );
+
+                CREATE TABLE IF NOT EXISTS operation_locks (
+                    lock_name TEXT PRIMARY KEY,
+                    owner TEXT NOT NULL,
+                    acquired_at TEXT NOT NULL,
+                    expires_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS alerts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    severity TEXT NOT NULL,
+                    category TEXT NOT NULL,
+                    platform TEXT,
+                    message TEXT NOT NULL,
+                    details_json TEXT NOT NULL DEFAULT '{}',
+                    dedupe_key TEXT,
+                    occurrences INTEGER NOT NULL DEFAULT 1,
+                    acknowledged_at TEXT
+                );
                 """
             )
             exchange_rate_columns = {
@@ -195,9 +228,83 @@ class Repository:
                 WHERE idempotency_key IS NOT NULL
                 """
             )
+            conn.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_alerts_open_dedupe
+                ON alerts(dedupe_key)
+                WHERE dedupe_key IS NOT NULL AND acknowledged_at IS NULL
+                """
+            )
+            self._apply_schema_migrations(conn)
+            self._recover_stale_runs(conn)
             count = conn.execute("SELECT COUNT(*) FROM holdings").fetchone()[0]
             if count == 0 and env_flag("TRADING_DASHBOARD_SEED_DEMO"):
                 self._seed(conn)
+
+    @staticmethod
+    def _apply_schema_migrations(conn: sqlite3.Connection) -> None:
+        applied = {
+            int(row["version"])
+            for row in conn.execute("SELECT version FROM schema_migrations").fetchall()
+        }
+        migrations = (
+            (1, "baseline_existing_schema"),
+            (2, "operational_locks_and_alerts"),
+        )
+        for version, name in migrations:
+            if version in applied:
+                continue
+            conn.execute(
+                "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)",
+                (version, name, utc_now()),
+            )
+
+    @staticmethod
+    def _recover_stale_runs(conn: sqlite3.Connection, *, stale_after_seconds: int = 300) -> None:
+        now = datetime.now(timezone.utc)
+        cutoff = (now - timedelta(seconds=stale_after_seconds)).isoformat()
+        recovered_at = now.isoformat()
+        recovered_syncs = conn.execute(
+            """
+            UPDATE sync_runs
+            SET completed_at = ?, status = 'failed', error = COALESCE(error, ?)
+            WHERE status = 'running' AND started_at < ?
+            """,
+            (recovered_at, "프로세스 재시작 후 중단된 동기화입니다.", cutoff),
+        ).rowcount
+        recovered_strategy_runs = conn.execute(
+            """
+            UPDATE strategy_runs
+            SET completed_at = ?, status = 'failed', error = COALESCE(error, ?)
+            WHERE status = 'running' AND started_at < ?
+            """,
+            (recovered_at, "프로세스 재시작 후 중단된 전략 실행입니다.", cutoff),
+        ).rowcount
+        if recovered_syncs or recovered_strategy_runs:
+            conn.execute(
+                """
+                INSERT INTO alerts
+                (created_at, updated_at, severity, category, message, details_json, dedupe_key)
+                VALUES (?, ?, 'error', 'stale_run_recovered', ?, ?, 'stale-run-recovered')
+                ON CONFLICT DO UPDATE SET
+                    updated_at = excluded.updated_at,
+                    message = excluded.message,
+                    details_json = excluded.details_json,
+                    occurrences = alerts.occurrences + 1
+                """,
+                (
+                    recovered_at,
+                    recovered_at,
+                    "중단된 동기화·전략 실행을 실패 상태로 복구했습니다.",
+                    json.dumps(
+                        {
+                            "sync_runs": recovered_syncs,
+                            "strategy_runs": recovered_strategy_runs,
+                        },
+                        ensure_ascii=False,
+                    ),
+                ),
+            )
 
     def _seed(self, conn: sqlite3.Connection) -> None:
         now = utc_now()
@@ -450,6 +557,169 @@ class Repository:
             ).fetchall()
             return [dict(row) for row in rows]
 
+    def schema_version(self) -> int:
+        with self.connect() as conn:
+            row = conn.execute("SELECT MAX(version) AS version FROM schema_migrations").fetchone()
+            return int(row["version"] or 0)
+
+    def migration_history(self) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT version, name, applied_at FROM schema_migrations ORDER BY version"
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def acquire_operation_lock(
+        self,
+        lock_name: str,
+        owner: str | None = None,
+        *,
+        lease_seconds: int = 300,
+    ) -> str | None:
+        owner = owner or uuid.uuid4().hex
+        now = datetime.now(timezone.utc)
+        expires_at = now + timedelta(seconds=max(1, min(int(lease_seconds), 86_400)))
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute("DELETE FROM operation_locks WHERE expires_at <= ?", (now.isoformat(),))
+            existing = conn.execute(
+                "SELECT owner FROM operation_locks WHERE lock_name = ?",
+                (lock_name,),
+            ).fetchone()
+            if existing:
+                if existing["owner"] != owner:
+                    return None
+                conn.execute(
+                    "UPDATE operation_locks SET expires_at = ? WHERE lock_name = ? AND owner = ?",
+                    (expires_at.isoformat(), lock_name, owner),
+                )
+                return owner
+            conn.execute(
+                """
+                INSERT INTO operation_locks (lock_name, owner, acquired_at, expires_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (lock_name, owner, now.isoformat(), expires_at.isoformat()),
+            )
+            return owner
+
+    def release_operation_lock(self, lock_name: str, owner: str) -> bool:
+        with self.connect() as conn:
+            cursor = conn.execute(
+                "DELETE FROM operation_locks WHERE lock_name = ? AND owner = ?",
+                (lock_name, owner),
+            )
+            return cursor.rowcount > 0
+
+    def operation_locks(self) -> list[dict[str, Any]]:
+        now = datetime.now(timezone.utc).isoformat()
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT lock_name, owner, acquired_at, expires_at
+                FROM operation_locks
+                WHERE expires_at > ?
+                ORDER BY lock_name
+                """,
+                (now,),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    @contextmanager
+    def operation_lock(
+        self,
+        lock_name: str,
+        owner: str | None = None,
+        *,
+        lease_seconds: int = 300,
+    ) -> Iterator[bool]:
+        lock_owner = owner or uuid.uuid4().hex
+        acquired = self.acquire_operation_lock(lock_name, lock_owner, lease_seconds=lease_seconds)
+        try:
+            yield acquired is not None
+        finally:
+            if acquired is not None:
+                self.release_operation_lock(lock_name, acquired)
+
+    def record_alert(
+        self,
+        *,
+        severity: str,
+        category: str,
+        message: str,
+        platform: str | None = None,
+        details: dict[str, Any] | None = None,
+        dedupe_key: str | None = None,
+    ) -> dict[str, Any]:
+        now = utc_now()
+        details_json = json.dumps(details or {}, ensure_ascii=False)
+        with self.connect() as conn:
+            row = None
+            if dedupe_key:
+                row = conn.execute(
+                    "SELECT * FROM alerts WHERE dedupe_key = ? AND acknowledged_at IS NULL ORDER BY id DESC LIMIT 1",
+                    (dedupe_key,),
+                ).fetchone()
+            if row:
+                conn.execute(
+                    """
+                    UPDATE alerts
+                    SET updated_at = ?, severity = ?, category = ?, platform = ?, message = ?,
+                        details_json = ?, occurrences = occurrences + 1
+                    WHERE id = ?
+                    """,
+                    (now, severity, category, platform, message, details_json, row["id"]),
+                )
+                row = conn.execute("SELECT * FROM alerts WHERE id = ?", (row["id"],)).fetchone()
+            else:
+                cursor = conn.execute(
+                    """
+                    INSERT INTO alerts
+                    (created_at, updated_at, severity, category, platform, message, details_json, dedupe_key)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (now, now, severity, category, platform, message, details_json, dedupe_key),
+                )
+                row = conn.execute("SELECT * FROM alerts WHERE id = ?", (cursor.lastrowid,)).fetchone()
+            return self._alert_row(row)
+
+    def alerts(self, limit: int = 50, *, include_acknowledged: bool = False) -> list[dict[str, Any]]:
+        safe_limit = max(1, min(int(limit), 200))
+        where = "" if include_acknowledged else "WHERE acknowledged_at IS NULL"
+        with self.connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT * FROM alerts
+                {where}
+                ORDER BY updated_at DESC, id DESC
+                LIMIT ?
+                """,
+                (safe_limit,),
+            ).fetchall()
+            return [self._alert_row(row) for row in rows]
+
+    def acknowledge_alert(self, alert_id: int) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            conn.execute(
+                "UPDATE alerts SET acknowledged_at = ?, updated_at = ? WHERE id = ?",
+                (utc_now(), utc_now(), alert_id),
+            )
+            row = conn.execute("SELECT * FROM alerts WHERE id = ?", (alert_id,)).fetchone()
+            return self._alert_row(row) if row else None
+
+    def unresolved_alert_count(self) -> int:
+        with self.connect() as conn:
+            return int(conn.execute("SELECT COUNT(*) FROM alerts WHERE acknowledged_at IS NULL").fetchone()[0])
+
+    @staticmethod
+    def _alert_row(row: sqlite3.Row) -> dict[str, Any]:
+        result = dict(row)
+        try:
+            result["details"] = json.loads(result.pop("details_json") or "{}")
+        except json.JSONDecodeError:
+            result["details"] = {}
+        return result
+
     def asset_aliases(self) -> list[dict[str, Any]]:
         with self.connect() as conn:
             rows = conn.execute(
@@ -617,47 +887,77 @@ class Repository:
         idempotency_key: str | None = None,
         cancellation_policy: str = "reject_before_submission",
     ) -> dict[str, Any]:
+        return self.create_orders(
+            [request],
+            status,
+            reason,
+            strategy_run_id=strategy_run_id,
+            idempotency_key=idempotency_key,
+            cancellation_policy=cancellation_policy,
+        )[0]
+
+    def create_orders(
+        self,
+        requests: list[dict[str, Any]],
+        status: str,
+        reason: str,
+        *,
+        strategy_run_id: int | None = None,
+        idempotency_keys: list[str | None] | None = None,
+        cancellation_policy: str = "reject_before_submission",
+    ) -> list[dict[str, Any]]:
+        if not requests:
+            return []
+        if idempotency_keys is not None and len(idempotency_keys) != len(requests):
+            raise ValueError("idempotency_keys 길이가 requests와 다릅니다.")
         now = utc_now()
+        rows: list[dict[str, Any]] = []
         with self.connect() as conn:
-            cursor = conn.execute(
-                """
-                INSERT INTO orders
-                (strategy_run_id, idempotency_key, cancellation_policy, created_at, platform, symbol, side, order_type, quantity, amount, currency, limit_price,
-                 reference_price, estimated_notional, estimated_fee, estimated_tax, estimated_slippage, estimated_total,
-                 dry_run, status, reason, request_json)
-                VALUES (
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+            for index, request in enumerate(requests):
+                key = (
+                    idempotency_keys[index]
+                    if idempotency_keys is not None
+                    else request.get("idempotency_key")
                 )
-                """,
-                (
-                    strategy_run_id,
-                    idempotency_key or request.get("idempotency_key"),
-                    cancellation_policy or request.get("cancellation_policy") or "reject_before_submission",
-                    now,
-                    request.get("platform"),
-                    request.get("symbol"),
-                    request.get("side"),
-                    request.get("order_type", "market"),
-                    request.get("quantity"),
-                    request.get("amount"),
-                    request.get("currency", "KRW"),
-                    request.get("limit_price"),
-                    request.get("reference_price"),
-                    request.get("estimated_notional"),
-                    request.get("estimated_fee"),
-                    request.get("estimated_tax"),
-                    request.get("estimated_slippage"),
-                    request.get("estimated_total"),
-                    1 if request.get("dry_run", True) else 0,
-                    status,
-                    reason,
-                    json.dumps(request, ensure_ascii=False),
-                ),
-            )
-            order_id = cursor.lastrowid
-            row = conn.execute("SELECT * FROM orders WHERE id = ?", (order_id,)).fetchone()
-            return dict(row)
+                cursor = conn.execute(
+                    """
+                    INSERT INTO orders
+                    (strategy_run_id, idempotency_key, cancellation_policy, created_at, platform, symbol, side, order_type, quantity, amount, currency, limit_price,
+                     reference_price, estimated_notional, estimated_fee, estimated_tax, estimated_slippage, estimated_total,
+                     dry_run, status, reason, request_json)
+                    VALUES (
+                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                    )
+                    """,
+                    (
+                        strategy_run_id,
+                        key,
+                        cancellation_policy or request.get("cancellation_policy") or "reject_before_submission",
+                        now,
+                        request.get("platform"),
+                        request.get("symbol"),
+                        request.get("side"),
+                        request.get("order_type", "market"),
+                        request.get("quantity"),
+                        request.get("amount"),
+                        request.get("currency", "KRW"),
+                        request.get("limit_price"),
+                        request.get("reference_price"),
+                        request.get("estimated_notional"),
+                        request.get("estimated_fee"),
+                        request.get("estimated_tax"),
+                        request.get("estimated_slippage"),
+                        request.get("estimated_total"),
+                        1 if request.get("dry_run", True) else 0,
+                        status,
+                        reason,
+                        json.dumps(request, ensure_ascii=False),
+                    ),
+                )
+                row = conn.execute("SELECT * FROM orders WHERE id = ?", (cursor.lastrowid,)).fetchone()
+                rows.append(dict(row))
+        return rows
 
     def strategy(self, strategy_id: int) -> dict[str, Any] | None:
         with self.connect() as conn:
