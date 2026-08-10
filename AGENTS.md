@@ -9,6 +9,7 @@
 
 ## 테스트 실행 환경
 
+- 프로젝트 루트에 `.venv`가 없으면 `Dockerfile`, `pyproject.toml` 등 프로젝트 설정에 명시된 Python 버전을 확인한 뒤 `uv venv --python <버전> .venv`로 생성한다. 요구 버전이 별도로 명시되지 않았다면 `uv venv .venv`를 사용하며, 가상환경 디렉터리는 커밋하지 않는다.
 - 모든 테스트는 프로젝트 가상환경 `.venv`의 Python으로 실행한다.
 - 전체 테스트의 표준 명령은 `.venv/bin/python -m unittest discover -s tests`이다.
 - 가상환경을 활성화한 경우에는 `python -m unittest discover -s tests`를 사용할 수 있다.
