@@ -898,6 +898,7 @@ class Repository:
         strategy_run_id: int | None = None,
         idempotency_key: str | None = None,
         cancellation_policy: str = "reject_before_submission",
+        created_at: str | None = None,
     ) -> dict[str, Any]:
         return self.create_orders(
             [request],
@@ -906,6 +907,7 @@ class Repository:
             strategy_run_id=strategy_run_id,
             idempotency_key=idempotency_key,
             cancellation_policy=cancellation_policy,
+            created_at=created_at,
         )[0]
 
     def create_orders(
@@ -917,12 +919,13 @@ class Repository:
         strategy_run_id: int | None = None,
         idempotency_keys: list[str | None] | None = None,
         cancellation_policy: str = "reject_before_submission",
+        created_at: str | None = None,
     ) -> list[dict[str, Any]]:
         if not requests:
             return []
         if idempotency_keys is not None and len(idempotency_keys) != len(requests):
             raise ValueError("idempotency_keys 길이가 requests와 다릅니다.")
-        now = utc_now()
+        now = created_at or utc_now()
         rows: list[dict[str, Any]] = []
         with self.connect() as conn:
             for index, request in enumerate(requests):
@@ -976,7 +979,14 @@ class Repository:
             row = conn.execute("SELECT * FROM strategies WHERE id = ?", (strategy_id,)).fetchone()
             return self._strategy_row(row) if row else None
 
-    def start_strategy_run(self, strategy_id: int, trigger: str, schedule_key: str | None = None) -> dict[str, Any] | None:
+    def start_strategy_run(
+        self,
+        strategy_id: int,
+        trigger: str,
+        schedule_key: str | None = None,
+        *,
+        started_at: str | None = None,
+    ) -> dict[str, Any] | None:
         with self.connect() as conn:
             try:
                 cursor = conn.execute(
@@ -984,7 +994,7 @@ class Repository:
                     INSERT INTO strategy_runs (strategy_id, trigger, schedule_key, started_at, status)
                     VALUES (?, ?, ?, ?, 'running')
                     """,
-                    (strategy_id, trigger, schedule_key, utc_now()),
+                    (strategy_id, trigger, schedule_key, started_at or utc_now()),
                 )
             except sqlite3.IntegrityError:
                 return None

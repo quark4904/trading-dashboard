@@ -470,7 +470,14 @@ class TradingService:
         schedule_key: str | None,
         now: datetime | None = None,
     ) -> dict[str, Any] | None:
-        run = self.repo.start_strategy_run(strategy["id"], trigger, schedule_key)
+        execution_now = _as_kst(now or self.clock())
+        execution_at = execution_now.astimezone(timezone.utc).isoformat()
+        run = self.repo.start_strategy_run(
+            strategy["id"],
+            trigger,
+            schedule_key,
+            started_at=execution_at,
+        )
         if not run:
             return None
 
@@ -478,7 +485,6 @@ class TradingService:
             items = strategy.get("params", {}).get("items") or []
             if not items:
                 raise ValueError("DCA 주문 항목이 없습니다.")
-            execution_now = _as_kst(now or self.clock())
             plans = []
             for index, item in enumerate(items):
                 key = make_idempotency_key(strategy["id"], run["id"], index, item["symbol"])
@@ -518,6 +524,7 @@ class TradingService:
                     strategy_run_id=run["id"],
                     idempotency_keys=[plan["idempotency_key"] for plan in plans],
                     cancellation_policy=CANCELLATION_POLICY,
+                    created_at=execution_at,
                 )
                 return self.repo.finish_strategy_run(
                     run["id"],
@@ -533,6 +540,7 @@ class TradingService:
                 strategy_run_id=run["id"],
                 idempotency_keys=[plan["idempotency_key"] for plan in plans],
                 cancellation_policy=CANCELLATION_POLICY,
+                created_at=execution_at,
             )
             return self.repo.finish_strategy_run(run["id"], status="success", order_count=len(plans))
         except Exception as exc:
