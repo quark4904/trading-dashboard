@@ -1,6 +1,7 @@
 .env
 *.db
 data/
+.venv/
 deploy/caddy-data/
 deploy/caddy-config/
 __pycache__/
