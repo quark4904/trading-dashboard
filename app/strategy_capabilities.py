@@ -101,11 +101,7 @@ _CAPABILITIES: dict[str, dict[str, Any]] = {
 
 
 def strategy_capabilities() -> dict[str, Any]:
-    return {
-        "strategy_type": DCA_STRATEGY_TYPE,
-        "strategy_types": [DCA_STRATEGY_TYPE],
-        "platforms": deepcopy(_CAPABILITIES),
-    }
+    return {"platforms": deepcopy(_CAPABILITIES)}
 
 
 def dca_market_capability(platform: str, market: str | None = None) -> tuple[str, dict[str, Any]]:

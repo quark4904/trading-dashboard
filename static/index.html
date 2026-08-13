@@ -10,7 +10,7 @@
     <aside class="sidebar">
       <div>
         <h1>Trading Dashboard</h1>
-        <p>DCA DRY_RUN MVP</p>
+        <p>DRY_RUN MVP</p>
       </div>
       <nav>
         <a href="#portfolio">손익 현황</a>
@@ -55,7 +55,7 @@
         <div class="section-title">
           <div>
             <h2>전략 관리</h2>
-            <p class="section-description">모든 전략은 플랫폼별 정기 분할 매수(DCA)로만 운용됩니다.</p>
+            <p class="section-description">투자 계획을 만들고 실행 상태를 관리합니다.</p>
           </div>
           <button id="newStrategyButton" type="button">새 전략 만들기</button>
         </div>
@@ -68,14 +68,12 @@
           <div class="strategy-dialog-header">
             <div>
               <h2 id="strategyDialogTitle">새 전략 만들기</h2>
-              <p>이 앱은 DCA 전략만 지원하며 플랫폼에 맞는 매수 항목만 표시합니다.</p>
+              <p>플랫폼에 맞는 주문 항목만 표시됩니다.</p>
             </div>
             <button id="strategyDialogClose" class="dialog-close" type="button" aria-label="닫기">×</button>
           </div>
           <div class="form-grid strategy-form-body">
           <label>전략명<input name="name" placeholder="예: 매일 BTC 분할 매수" required /></label>
-          <div class="strategy-type-summary"><span>전략 유형</span><strong>DCA · 정기 분할 매수</strong><small>다른 전략 유형은 저장할 수 없습니다.</small></div>
-          <input name="strategy_type" type="hidden" value="dca" />
           <label>플랫폼<select name="platform" required></select></label>
           <div id="dcaItemsEditor" class="dca-items-editor" data-dca-field>
             <div class="dca-items-header">

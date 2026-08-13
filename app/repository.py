@@ -1244,7 +1244,7 @@ class Repository:
     @staticmethod
     def _require_dca_strategy(request: dict[str, Any]) -> None:
         if str(request.get("strategy_type") or DCA_STRATEGY_TYPE).strip().lower() != DCA_STRATEGY_TYPE:
-            raise ValueError("현재는 DCA 전략만 저장할 수 있습니다.")
+            raise ValueError("지원하지 않는 전략 요청입니다.")
 
 
 def _parse_datetime(value: Any) -> datetime | None:

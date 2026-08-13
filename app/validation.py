@@ -18,7 +18,7 @@ def validate_strategy(data: dict) -> dict:
 
     strategy_type = str(data.get("strategy_type") or DCA_STRATEGY_TYPE).strip().lower()
     if strategy_type != DCA_STRATEGY_TYPE:
-        raise ValueError("현재는 DCA 전략만 지원합니다.")
+        raise ValueError("지원하지 않는 전략 요청입니다.")
 
     platform = str(data.get("platform") or "").strip()
     if platform and platform not in {item.code for item in platform_configs()}:
@@ -35,18 +35,18 @@ def validate_strategy(data: dict) -> dict:
     params = data.get("params") if isinstance(data.get("params"), dict) else {}
     if strategy_type == DCA_STRATEGY_TYPE:
         if not platform:
-            raise ValueError("DCA 전략의 플랫폼을 선택하세요.")
+            raise ValueError("플랫폼을 선택하세요.")
         raw_items = params.get("items")
         if isinstance(raw_items, list):
             items = []
             for raw_item in raw_items:
                 if not isinstance(raw_item, dict):
-                    raise ValueError("DCA 자산 설정을 확인하세요.")
+                    raise ValueError("자산 설정을 확인하세요.")
                 item_symbol = str(raw_item.get("symbol") or "").strip().upper()
                 raw_value = raw_item.get("value")
                 if raw_value is None:
                     raw_value = raw_item.get("quantity") if raw_item.get("order_type") == "quantity" else raw_item.get("amount", raw_item.get("amount_usd"))
-                item_value = validated_number(raw_value, f"{item_symbol or 'DCA 자산'} 주문 값")
+                item_value = validated_number(raw_value, f"{item_symbol or '자산'} 주문 값")
                 market_value = raw_item.get("market")
                 market = str(market_value) if market_value else None
                 items.append(normalize_dca_item(platform, item_symbol, item_value, market))
@@ -59,17 +59,17 @@ def validate_strategy(data: dict) -> dict:
                 if item.strip()
             ]
         if not items:
-            raise ValueError("DCA 종목 코드를 하나 이상 입력하세요.")
+            raise ValueError("종목 코드를 하나 이상 입력하세요.")
         symbols = [item["symbol"] for item in items]
         if len(items) > 20 or any(not item.replace(".", "").replace("-", "").isalnum() for item in symbols):
-            raise ValueError("DCA 종목 코드를 확인하세요. 최대 20개까지 입력할 수 있습니다.")
+            raise ValueError("종목 코드를 확인하세요. 최대 20개까지 입력할 수 있습니다.")
         if any(dca_item_value(item) <= 0 for item in items):
             raise ValueError("자산별 주문 값은 0보다 커야 합니다.")
         if len(set(symbols)) != len(symbols):
-            raise ValueError("DCA 전략에 같은 종목을 중복해서 입력할 수 없습니다.")
+            raise ValueError("같은 종목을 중복해서 입력할 수 없습니다.")
         interval = str(params.get("interval") or "daily")
         if interval not in {"daily", "weekly", "monthly"}:
-            raise ValueError("지원하지 않는 DCA 실행 주기입니다.")
+            raise ValueError("지원하지 않는 실행 주기입니다.")
         execution_time = str(params.get("execution_time") or "23:30")
         match = re.fullmatch(r"(\d{2}):(\d{2})", execution_time)
         if not match or int(match.group(1)) > 23 or int(match.group(2)) > 59:
@@ -78,14 +78,14 @@ def validate_strategy(data: dict) -> dict:
         if interval == "weekly":
             execution_day = str(execution_day or "monday").lower()
             if execution_day not in {"monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"}:
-                raise ValueError("주간 DCA 실행 요일을 확인하세요.")
+                raise ValueError("주간 실행 요일을 확인하세요.")
         elif interval == "monthly":
             try:
                 execution_day = int(execution_day or 1)
             except (TypeError, ValueError) as exc:
-                raise ValueError("월간 DCA 실행일을 확인하세요.") from exc
+                raise ValueError("월간 실행일을 확인하세요.") from exc
             if not 1 <= execution_day <= 28:
-                raise ValueError("월간 DCA 실행일은 1일부터 28일까지 선택할 수 있습니다.")
+                raise ValueError("월간 실행일은 1일부터 28일까지 선택할 수 있습니다.")
         raw_risk_limits = params.get("risk_limits") if isinstance(params.get("risk_limits"), dict) else {}
         max_orders_per_day = validated_number(
             params.get("max_orders_per_day", raw_risk_limits.get("max_orders_per_day", DEFAULT_MAX_ORDERS_PER_DAY)),

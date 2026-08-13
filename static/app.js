@@ -518,7 +518,7 @@ async function renderStrategyRuns() {
           <td>${escapeHtml(run.error || "-")}</td>
         </tr>
       `)
-      : [`<tr><td colspan="6">아직 DCA 실행 이력이 없습니다.</td></tr>`],
+      : [`<tr><td colspan="6">아직 전략 실행 이력이 없습니다.</td></tr>`],
   );
 }
 
@@ -549,7 +549,6 @@ function strategyCard(item) {
           <h3>${escapeHtml(item.name)}</h3>
         </div>
         <div class="strategy-meta">
-          <span>DCA · 정기 분할 매수</span>
           <span>${escapeHtml(platformLabel(item.platform))}</span>
           <span>${escapeHtml(schedule)}</span>
         </div>
@@ -707,7 +706,6 @@ function formObject(form) {
 function updateStrategyFields() {
   const form = document.querySelector("#strategyForm");
   const budgetLabel = document.querySelector("#strategyBudgetField");
-  form.elements.strategy_type.value = "dca";
   budgetLabel.firstChild.textContent = "일일 예산 한도 (KRW)";
   form.querySelectorAll("[data-dca-field]").forEach((element) => element.classList.remove("hidden"));
   updateExecutionDayField();
@@ -1151,7 +1149,6 @@ function openStrategyDialog(strategy = null) {
   resetDcaItems();
   if (strategy) {
     form.elements.name.value = strategy.name;
-    form.elements.strategy_type.value = "dca";
     form.elements.platform.value = strategy.platform || "";
     form.elements.budget.value = strategy.budget || 0;
     form.elements.max_orders_per_day.value = strategy.params?.risk_limits?.max_orders_per_day || strategy.params?.max_orders_per_day || 20;

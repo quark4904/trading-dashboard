@@ -325,7 +325,7 @@ class OperationalRepositoryTests(unittest.TestCase):
         self.assertEqual(remaining, 0)
 
     def test_repository_rejects_non_dca_strategy_writes(self) -> None:
-        with self.assertRaisesRegex(ValueError, "DCA 전략만"):
+        with self.assertRaisesRegex(ValueError, "지원하지 않는 전략"):
             self.repo.create_strategy(
                 {
                     "name": "레거시 전략",
@@ -716,7 +716,7 @@ class ValidationTests(unittest.TestCase):
         self.assertFalse(result["enabled"])
 
     def test_non_dca_strategy_is_rejected(self) -> None:
-        with self.assertRaisesRegex(ValueError, "DCA 전략만"):
+        with self.assertRaisesRegex(ValueError, "지원하지 않는 전략"):
             validate_strategy(
                 {
                     "name": "지원하지 않는 전략",
