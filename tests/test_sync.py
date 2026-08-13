@@ -16,6 +16,7 @@ from urllib.request import Request
 from unittest.mock import MagicMock, patch
 
 from app.auth import AuthManager, hash_password, verify_password
+from app.backtest import run_dca_backtest
 from app.config import api_key_expirations
 from app.fee_policies import FeePolicyStore
 from app.integrations.fx import FxError, usd_krw_rate
@@ -1088,6 +1089,101 @@ class StrategyCapabilityTests(unittest.TestCase):
             )
 
 
+class BacktestTests(unittest.TestCase):
+    def strategy(self, **overrides):
+        strategy = {
+            "id": 7,
+            "name": "백테스트 DCA",
+            "strategy_type": "dca",
+            "enabled": False,
+            "platform": "upbit",
+            "budget": 0,
+            "params": {
+                "items": [
+                    {
+                        "symbol": "KRW-BTC",
+                        "market": "crypto",
+                        "order_type": "amount",
+                        "amount": 5_000,
+                        "currency": "KRW",
+                    }
+                ],
+                "interval": "daily",
+                "execution_time": "10:00",
+                "cost_overrides": {"fee_pct": 1, "tax_pct": 0, "slippage_pct": 0},
+                "risk_limits": {"daily_budget_krw": 6_000, "max_orders_per_day": 1},
+            },
+        }
+        strategy.update(overrides)
+        return strategy
+
+    def test_backtest_uses_first_bar_after_schedule_and_applies_costs(self) -> None:
+        result = run_dca_backtest(
+            self.strategy(),
+            [
+                {"timestamp": "2026-08-03T09:00:00+09:00", "prices": {"KRW-BTC": 100}},
+                {"timestamp": "2026-08-03T10:05:00+09:00", "prices": {"KRW-BTC": 110}},
+                {"timestamp": "2026-08-03T11:00:00+09:00", "prices": {"KRW-BTC": 120}},
+                {"timestamp": "2026-08-04T10:01:00+09:00", "prices": {"KRW-BTC": 90}},
+                {"timestamp": "2026-08-04T11:00:00+09:00", "prices": {"KRW-BTC": 100}},
+            ],
+            12_000,
+        )
+
+        self.assertEqual(result["trade_count"], 2)
+        self.assertEqual(result["rejected_count"], 0)
+        self.assertEqual(result["scheduled_count"], 2)
+        self.assertEqual(result["fees"], 100)
+        self.assertEqual(result["final_cash"], 1_900)
+        self.assertEqual(result["holdings"][0]["current_price"], 100)
+        self.assertEqual(result["trades"][0]["timestamp"], "2026-08-03T10:05:00+09:00")
+        self.assertFalse(result["assumptions"]["live_api_called"])
+
+    def test_backtest_rejects_when_virtual_cash_is_insufficient(self) -> None:
+        result = run_dca_backtest(
+            self.strategy(),
+            [{"timestamp": "2026-08-03T10:00:00+09:00", "prices": {"KRW-BTC": 100}}],
+            5_000,
+        )
+
+        self.assertEqual(result["trade_count"], 0)
+        self.assertEqual(result["rejected_count"], 1)
+        self.assertEqual(result["trades"][0]["reason"], "가상 현금이 부족합니다.")
+        self.assertEqual(result["final_cash"], 5_000)
+
+    def test_backtest_rejects_mixed_currencies(self) -> None:
+        strategy = self.strategy(
+            platform="toss",
+            params={
+                "items": [
+                    {
+                        "symbol": "005930",
+                        "market": "domestic",
+                        "order_type": "quantity",
+                        "quantity": 1,
+                        "currency": "KRW",
+                    },
+                    {
+                        "symbol": "SCHD",
+                        "market": "overseas",
+                        "order_type": "amount",
+                        "amount": 5,
+                        "currency": "USD",
+                    },
+                ],
+                "interval": "daily",
+                "execution_time": "10:00",
+            }
+        )
+
+        with self.assertRaisesRegex(ValueError, "하나의 통화"):
+            run_dca_backtest(
+                strategy,
+                [{"timestamp": "2026-08-03T10:00:00+09:00", "prices": {"005930": 100, "SCHD": 10}}],
+                10_000,
+            )
+
+
 class StrategyRunTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -1587,6 +1683,24 @@ class HTTPApiIntegrationTests(unittest.TestCase):
         )
         self.assertEqual(status, 201)
         self.assertEqual(created["strategy_type"], "dca")
+
+        status, backtest = self.request(
+            "POST",
+            "/api/backtests",
+            {
+                "strategy_id": created["id"],
+                "initial_cash": 6_000,
+                "bars": [
+                    {
+                        "timestamp": "2026-08-03T23:30:00+09:00",
+                        "prices": {"KRW-BTC": 100_000_000},
+                    }
+                ],
+            },
+        )
+        self.assertEqual(status, 201)
+        self.assertEqual(backtest["trade_count"], 1)
+        self.assertFalse(backtest["assumptions"]["live_api_called"])
 
         self.repo.record_alert(
             severity="error",

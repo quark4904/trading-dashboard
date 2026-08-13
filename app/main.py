@@ -218,6 +218,15 @@ class Handler(BaseHTTPRequestHandler):
             return self.json_response({"error": str(exc)}, status=400)
         if parsed.path == "/api/orders":
             return self.json_response({"error": "수동 주문은 지원하지 않습니다. 전략 실행 엔진에서만 주문 기록을 생성합니다."}, status=405)
+        if parsed.path == "/api/backtests":
+            try:
+                strategy_id = int(data.get("strategy_id"))
+                bars = data.get("bars")
+                initial_cash = data.get("initial_cash")
+                result = self.trading_service.run_dca_backtest(strategy_id, bars, initial_cash)
+            except (TypeError, ValueError) as exc:
+                return self.json_response({"error": str(exc)}, status=400)
+            return self.json_response(result, status=201)
         if parsed.path == "/api/strategy-runs/execute-due":
             return self.json_response(self.trading_service.run_due_dca_strategies())
         if parsed.path.startswith("/api/strategies/") and parsed.path.endswith("/dry-run"):

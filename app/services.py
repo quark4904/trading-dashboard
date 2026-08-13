@@ -6,6 +6,7 @@ from typing import Any, Callable
 from uuid import uuid4
 
 from app.config import execution_history_days, platform_configs
+from app.backtest import run_dca_backtest
 from app.fee_policies import FeePolicyStore
 from app.integrations.fx import usd_krw_rate
 from app.integrations.kis import KISClient, kis_accounts
@@ -417,6 +418,22 @@ class TradingService:
         if strategy["strategy_type"] != "dca":
             raise ValueError("DCA 전략만 DRY_RUN 테스트를 실행할 수 있습니다.")
         return self._run_dca_strategy(strategy, trigger="manual", schedule_key=None, now=None)
+
+    def run_dca_backtest(
+        self,
+        strategy_id: int,
+        bars: list[dict[str, Any]],
+        initial_cash: float,
+    ) -> dict[str, Any]:
+        strategy = self.repo.strategy(strategy_id)
+        if not strategy:
+            raise ValueError("전략을 찾을 수 없습니다.")
+        return run_dca_backtest(
+            strategy,
+            bars,
+            initial_cash,
+            fee_policy_store=self.fee_policy_store,
+        )
 
     def _run_dca_strategy(
         self,
