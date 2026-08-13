@@ -1,5 +1,8 @@
 # 접근 보안과 배포
 
+이 문서는 외부 접근 경로, HTTPS 종료, 영속 데이터, 운영 상태 점검 구성을 다룬다. 일상적인
+장애 대응과 SQLite 복구 명령은 [`operations.md`](operations.md)를 기준으로 한다.
+
 ## 외부 인증: Cloudflare Tunnel과 Access
 
 이 운영 환경은 단일 사용자용이므로 Cloudflare Access를 유일한 외부 인증 계층으로 사용한다.
@@ -37,6 +40,25 @@ chmod 600 .env
 이 모드에서 대시보드 API는 단일 Access 사용자만 사용하므로 앱 내부의 `viewer/operator`
 분리는 필요하지 않다. 앱 비밀번호 인증 코드는 비상용 선택 기능으로 남아 있지만 기본적으로
 사용하지 않는다.
+
+Tunnel을 사용하지 않고 Caddy `secure` profile로 직접 외부에 공개하는 경우 Caddy는 TLS만
+제공하고 사용자 인증은 제공하지 않는다. 따라서 외부 공개 전에 앱 인증을 활성화하고 두
+역할의 PBKDF2 해시를 설정해야 한다.
+
+해시는 `.env`의 `TRADING_DASHBOARD_VIEWER_PASSWORD_HASH`와
+`TRADING_DASHBOARD_OPERATOR_PASSWORD_HASH`에 각각 저장한다.
+
+```dotenv
+TRADING_DASHBOARD_AUTH_ENABLED=true
+TRADING_DASHBOARD_COOKIE_SECURE=true
+```
+
+해시는 다음 명령으로 각각 생성할 수 있다. 비밀번호나 생성된 해시는 셸 기록과 저장소에
+노출하지 않도록 주의한다.
+
+```bash
+docker compose exec trading-dashboard python -m app.auth hash-password
+```
 
 ## HTTPS reverse proxy
 
@@ -80,5 +102,5 @@ docker compose exec trading-dashboard \
   python -m app.maintenance integrity --database /data/trading_dashboard.db
 ```
 
-자동 백업 실패는 운영 알림과 로그에 기록된다. 복구 절차는 [`docs/operations.md`](operations.md)의
+자동 백업 실패는 운영 알림과 로그에 기록된다. 복구 절차는 [`operations.md`](operations.md)의
 SQLite 백업·복구 항목을 따른다.

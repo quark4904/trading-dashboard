@@ -4,6 +4,14 @@
 백테스트 중에는 거래소·증권사 API를 호출하지 않으며, 주문 이력이나 실제 보유 자산도 변경하지
 않습니다.
 
+## 호출 전제
+
+- `strategy_id`는 저장된 DCA 전략을 가리켜야 한다. 현재 DCA 매수만 지원한다.
+- `initial_cash`는 0보다 커야 하며, 한 번의 백테스트에서 전략 주문과 같은 통화로 해석한다.
+- `bars`는 하나 이상, 최대 20,000개를 입력한다. `timestamp`는 ISO 8601 형식이고 중복될 수 없다.
+- 입력된 가격 바는 시간순으로 정렬해 처리한다. 타임존이 없는 `timestamp`는 KST로 해석한다.
+- 인증을 활성화한 경우 이 `POST` API는 `operator` 권한이 필요하다.
+
 ## 요청
 
 ```json
@@ -45,6 +53,9 @@
 - `equity_curve`: 가격 바별 현금·보유금액·총 평가금액
 - `fees`, `taxes`, `slippage`: 누적 거래 비용
 - `trade_count`, `rejected_count`, `pnl`, `return_pct`: 요약 지표
+
+각 `trades` 항목의 `status`는 `filled` 또는 `rejected`이며, 거부된 주문에는 사유가 포함된다.
+`equity_curve`는 각 가격 바 처리 후의 현금·보유금액·총 평가금액을 기록한다.
 
 수수료·세금은 전략의 직접 설정값과 `config/fee-policies.json`을 사용합니다. 슬리피지는 매수
 체결 가격과 예상 비용에 반영됩니다. 업비트 실시간 요율 조회나 기타 외부 사전검증은 실행하지

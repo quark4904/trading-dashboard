@@ -2,6 +2,23 @@
 
 이 문서는 실제 주문을 안전하게 도입하기 전까지의 개발 순서와 각 단계의 완료 기준을 정의한다.
 
+## 현재 상태 요약
+
+| 단계 | 주제 | 상태 |
+|---|---|---|
+| 1 | DCA DRY_RUN 실행 흐름 | 완료 |
+| 2 | DRY_RUN 거래 비용 추정 | 완료 |
+| 3 | 주문 전 리스크 검증 | 완료 |
+| 4 | 운영 안정성 | 완료 |
+| 5 | 접근 보안과 배포 | 완료 |
+| 6 | DCA 백테스트 API | 완료 |
+| 7 | 제한된 실주문 전환 | 미완료 |
+
+현재 운영 모드는 DRY_RUN이다. 1~6단계의 상세 규칙은 각각
+[`platform-order-requirements.md`](platform-order-requirements.md),
+[`backtesting.md`](backtesting.md), [`operations.md`](operations.md),
+[`security-and-deployment.md`](security-and-deployment.md)에서 관리한다.
+
 ## 1단계: DCA DRY_RUN 실행 흐름 — 완료 ✅
 
 목표는 활성 DCA 전략만을 KST 일정에 따라 평가하고, 실제 주문 없이 플랫폼별 주문 요청을 생성·기록하는 것이다.
@@ -47,16 +64,10 @@
 
 완료 기준: 검증에 실패한 주문은 외부 주문 API를 호출하지 않고 실패 사유를 실행 이력에 남긴다. **충족**
 
-구현 범위: 업비트는 실행 직전 `orders/chance` 응답에서 종목 상태, 금액 주문 지원 여부,
-최소·최대 주문 금액, 매수 수수료, 주문 가능 원화를 확인한다. 한국투자·토스는 최근
-성공한 잔고 동기화의 통화별 주문 가능 현금과 종목 현재가를 사용하며, 수량 주문의 현재가가
-없으면 검증을 거부한다. 국내주식과 미국주식은 각각 정규 거래시간을 확인하고, 전략에는
-원화 기준 일일 예산과 일일 최대 주문 횟수를 저장한다.
-
-모든 주문 계획은 외부 호출 전에 검증되며, 실패 시 `risk_rejected` 주문과 실행 이력 오류를
-남긴다. 주문에는 36자 이내 멱등성 키와 `reject_before_submission` 취소 정책을 저장한다.
-현재 실주문 어댑터가 없으므로 실제 취소 API는 호출하지 않으며, 향후 실주문 전환 시 이
-정책을 미체결 주문 취소 규칙의 기본값으로 사용한다.
+구현 세부사항과 플랫폼별 검증 항목은
+[`platform-order-requirements.md`](platform-order-requirements.md)의 주문 전 리스크 검증을
+기준으로 한다. 모든 주문 계획은 외부 호출 전에 검증하며, 실패 시 `risk_rejected` 주문과
+실행 이력 오류를 남긴다. 현재 실주문 어댑터가 없으므로 취소 API는 호출하지 않는다.
 
 ## 4단계: 운영 안정성 — 완료 ✅
 
@@ -68,14 +79,9 @@
 완료 기준: 재시작·외부 API 일시 장애·중복 요청 상황에서 자산과 주문 이력이 일관되게 보존된다.
 **충족**
 
-구현 범위: 외부 `GET` 호출은 일시적 네트워크·서버 오류와 HTTP 429를 제한적으로 재시도하고,
-`Retry-After`와 지수 백오프를 적용한다. 토큰 발급 `POST`는 기본 재시도하지 않는다. 플랫폼별
-동기화와 전략 실행은 SQLite lease 잠금으로 직렬화하며, 프로세스가 중단되어도 만료된 잠금은
-다시 회수할 수 있다. 동기화·전략·스케줄러 장애와 잠금 경합은 중복을 합친 운영 알림으로
-기록하고 API와 동기화 상태 화면에서 확인 처리할 수 있다.
-
-SQLite Online Backup API 기반 백업·복구 CLI와 `schema_migrations` 이력을 제공한다. 백업·복구
-명령과 운영 전후 확인 절차는 [`docs/operations.md`](operations.md)에 정리했다.
+구현 세부사항, 장애 알림, 잠금, 백업·복구 명령은
+[`operations.md`](operations.md)에 정리했다. 이 단계의 완료 기준은 재시작·외부 API 일시
+장애·중복 요청 뒤에도 자산과 주문 이력이 일관되게 보존되는지로 판단한다.
 
 ## 5단계: 접근 보안과 배포 — 구현 완료 ✅
 
@@ -87,11 +93,10 @@ SQLite Online Backup API 기반 백업·복구 CLI와 `schema_migrations` 이력
 완료 기준: 인증되지 않은 사용자가 전략 수정, 동기화, 실행 API를 호출할 수 없다.
 **충족**
 
-구현 범위: Cloudflare Tunnel·Access를 통한 외부 접근 제어, 보안 응답 헤더, 선택적
-PBKDF2 `viewer`·`operator` 앱 인증과 CSRF 보호를 제공한다. Cloudflare Tunnel 운영에서는
-앱 비밀번호 인증을 사용하지 않으며, Caddy secure profile은 Tunnel을 사용하지 않는 환경에서
-선택적으로 사용한다. 운영 로그·SQLite 상태 점검·일일 백업 및 보존 기간 정리도 자동화한다.
-설정 절차는 [`docs/security-and-deployment.md`](security-and-deployment.md)에 정리했다.
+구성 절차와 보안 모드별 전제는
+[`security-and-deployment.md`](security-and-deployment.md)에 정리했다. Cloudflare
+Tunnel·Access, 선택적 PBKDF2 `viewer`·`operator` 앱 인증, CSRF 보호, 운영 로그와 일일
+백업을 포함한다.
 
 운영 전제: Cloudflare Access에서 본인 계정만 Allow하고, Tunnel 원본은
 `http://127.0.0.1:8765`로 연결한다. 저장소의 `.env`에는 앱 비밀번호 해시를 설정하지 않고
@@ -110,7 +115,7 @@ PBKDF2 `viewer`·`operator` 앱 인증과 CSRF 보호를 제공한다. Cloudflar
 
 제한 사항: 현재 DCA 매수만 지원하며 결과 전용 저장소와 화면 UI는 없다. 매도·익절·손절과
 실시간 모의매매 잔고는 다음 단계에서 추가한다. 상세 요청 형식은
-[`docs/backtesting.md`](backtesting.md)를 참고한다.
+[`backtesting.md`](backtesting.md)를 참고한다.
 
 ## 7단계: 제한된 실주문 전환 — 미완료 ⏳
 

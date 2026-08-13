@@ -4,6 +4,13 @@
 동기화와 주문 실행이 겹치지 않게 하며, 장애 원인을 대시보드 알림과 SQLite에 남기는 것을
 목표로 한다.
 
+이 문서는 일상 운영과 장애 대응 절차를 다룬다. 외부 접근·HTTPS·Compose 보안 구성은
+[`security-and-deployment.md`](security-and-deployment.md)를, 변경사항의 검증·반영 순서는
+[`work-completion-policy.md`](work-completion-policy.md)를 기준으로 한다.
+
+운영 명령은 저장소 루트에서 실행하며 Compose 서비스 이름은 `trading-dashboard`다. 데이터베이스,
+백업, 로그는 `/data` 볼륨에 보존된다.
+
 ## 외부 API 재시도와 호출 제한
 
 업비트·한국투자·토스증권·환율 조회는 공통 HTTP 전송 정책을 사용한다.
@@ -74,5 +81,10 @@ docker compose exec trading-dashboard \
 이력 확인을 수행한다. `.env`와 데이터베이스는 백업 명령의 대상이 아니므로 별도로 보존한다.
 
 스키마는 `schema_migrations`에 버전과 적용 시각을 기록한다. 애플리케이션 시작 시 누락된
-마이그레이션을 idempotent하게 적용하며, 현재 버전은 3이다. 버전 3은 실제 체결의 출처와
-전략 연결 정보를 추가하며 기존 체결은 `external`로 보존한다.
+마이그레이션을 idempotent하게 적용하며, 현재 스키마 버전은 4이다.
+
+- 버전 3: 실제 체결의 출처와 전략 연결 정보 추가. 기존 체결은 `external`로 보존한다.
+- 버전 4: DCA 전용 전략 모드로 전환하고, DCA가 아닌 기존 전략을 제거한다.
+
+마이그레이션 상태는 API 또는 CLI로 확인한다. 운영 데이터에 영향을 줄 수 있으므로 버전 4가
+적용된 데이터베이스를 이전 애플리케이션에 되돌려 사용하지 않는다.

@@ -61,9 +61,11 @@ docker compose logs -f
 docker compose down
 ```
 
+문서 전체 목록과 읽기 순서는 [`docs/README.md`](docs/README.md)를 참고하세요.
+
 ## 작업 완료 및 배포
 
-변경 작업은 관련 검증에 문제가 없을 때 **커밋 → 푸시 → Docker Compose 배포 → 배포 후 확인** 순서로 반영합니다. 세부 기준과 중단 조건은 [`docs/work-completion-policy.md`](docs/work-completion-policy.md)에 정리되어 있으며, 프로젝트 작업 지침은 [`AGENTS.md`](AGENTS.md)에서 관리합니다.
+저장소와 운영 환경에 반영하는 변경은 관련 검증에 문제가 없을 때 **커밋 → 푸시 → Docker Compose 배포 → 배포 후 확인** 순서로 진행합니다. 세부 기준과 중단 조건은 [`docs/work-completion-policy.md`](docs/work-completion-policy.md)에 정리되어 있으며, 프로젝트 작업 지침은 [`AGENTS.md`](AGENTS.md)에서 관리합니다.
 
 ## 포함된 기능
 
