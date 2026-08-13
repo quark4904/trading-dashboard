@@ -11,12 +11,11 @@
 | 3 | 주문 전 리스크 검증 | 완료 |
 | 4 | 운영 안정성 | 완료 |
 | 5 | 접근 보안과 배포 | 완료 |
-| 6 | DCA 백테스트 API | 완료 |
-| 7 | 제한된 실주문 전환 | 미완료 |
+| 6 | 제한된 실주문 전환 | 미완료 |
 
-현재 운영 모드는 DRY_RUN이다. 1~6단계의 상세 규칙은 각각
+현재 운영 모드는 DRY_RUN이다. 1~5단계의 상세 규칙은 각각
 [`platform-order-requirements.md`](platform-order-requirements.md),
-[`backtesting.md`](backtesting.md), [`operations.md`](operations.md),
+[`operations.md`](operations.md),
 [`security-and-deployment.md`](security-and-deployment.md)에서 관리한다.
 
 ## 1단계: DCA DRY_RUN 실행 흐름 — 완료 ✅
@@ -102,22 +101,7 @@ Tunnel·Access, 선택적 PBKDF2 `viewer`·`operator` 앱 인증, CSRF 보호, �
 `http://127.0.0.1:8765`로 연결한다. 저장소의 `.env`에는 앱 비밀번호 해시를 설정하지 않고
 `TRADING_DASHBOARD_AUTH_ENABLED=false`를 유지한다.
 
-## 6단계: DCA 백테스트 API — 구현 완료 ✅
-
-- [x] 저장된 DCA 전략과 과거 가격 바를 사용하는 백테스트 계산 엔진
-- [x] 전략 실행 일정·거래시간·일일 예산·최대 주문 횟수 반영
-- [x] 공식 비용 정책·사용자 비용 설정·슬리피지 가정 반영
-- [x] 가상 현금·보유 수량·거래별 손익·자산 곡선 계산
-- [x] 거래소·증권사 API를 호출하지 않는 백테스트 API 제공
-
-완료 기준: `POST /api/backtests`에서 체결·거부 주문, 종료 보유 자산, 손익, 자산 곡선을
-확인할 수 있어야 한다. **충족**
-
-제한 사항: 현재 DCA 매수만 지원하며 결과 전용 저장소와 화면 UI는 없다. 매도·익절·손절과
-실시간 모의매매 잔고는 다음 단계에서 추가한다. 상세 요청 형식은
-[`backtesting.md`](backtesting.md)를 참고한다.
-
-## 7단계: 제한된 실주문 전환 — 미완료 ⏳
+## 6단계: 제한된 실주문 전환 — 미완료 ⏳
 
 - [ ] 플랫폼별 주문 어댑터를 별도 승인 플래그 아래 구현
 - [ ] 소액·단일 플랫폼·명시적 운영 승인 범위에서만 활성화
