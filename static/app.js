@@ -134,7 +134,7 @@ function renderPlatforms() {
   const options = state.platforms
     .map((p) => `<option value="${escapeHtml(p.code)}">${escapeHtml(p.name)}</option>`)
     .join("");
-  document.querySelector('#strategyForm select[name="platform"]').innerHTML = `<option value="">전체</option>${options}`;
+  document.querySelector('#strategyForm select[name="platform"]').innerHTML = `<option value="">플랫폼 선택</option>${options}`;
   updateStrategyFields();
   const assetFilter = document.querySelector("#assetPlatformFilter");
   const currentValue = state.platforms.some((p) => p.code === state.assetFilters.platform)
@@ -537,12 +537,10 @@ async function renderStrategies() {
 }
 
 function strategyCard(item) {
-  const target = item.strategy_type === "dca"
-    ? dcaItems(item, item.platform).map((entry) => `${entry.symbol} ${dcaItemValueLabel(entry)}`).join(" · ")
-    : item.symbol || "전체 자산";
-  const schedule = item.strategy_type === "dca"
-    ? `${scheduleLabel(item.params)} · ${item.budget > 0 ? `일일 ${won.format(item.budget)}` : "예산 제한 없음"} · 최대 ${(item.params?.risk_limits?.max_orders_per_day || 20)}건`
-    : `${won.format(item.budget || 0)} 예산`;
+  const target = dcaItems(item, item.platform)
+    .map((entry) => `${entry.symbol} ${dcaItemValueLabel(entry)}`)
+    .join(" · ");
+  const schedule = `${scheduleLabel(item.params)} · ${item.budget > 0 ? `일일 ${won.format(item.budget)}` : "예산 제한 없음"} · 최대 ${(item.params?.risk_limits?.max_orders_per_day || 20)}건`;
   return `
     <article class="strategy-card">
       <div class="strategy-card-main">
@@ -551,15 +549,15 @@ function strategyCard(item) {
           <h3>${escapeHtml(item.name)}</h3>
         </div>
         <div class="strategy-meta">
-          <span>${item.strategy_type === "dca" ? "DCA" : escapeHtml(item.strategy_type)}</span>
-          <span>${escapeHtml(item.platform ? platformLabel(item.platform) : "전체")}</span>
+          <span>DCA · 정기 분할 매수</span>
+          <span>${escapeHtml(platformLabel(item.platform))}</span>
           <span>${escapeHtml(schedule)}</span>
         </div>
         <p>${escapeHtml(target)}</p>
       </div>
       <div class="strategy-card-actions">
         <button class="secondary" data-strategy="${escapeHtml(item.id)}" data-action="toggle" data-enabled="${!item.enabled}">${item.enabled ? "중지" : "활성"}</button>
-        ${item.strategy_type === "dca" ? `<button class="table-action" data-strategy="${escapeHtml(item.id)}" data-action="dry-run">DRY_RUN 테스트</button>` : ""}
+        <button class="table-action" data-strategy="${escapeHtml(item.id)}" data-action="dry-run">DRY_RUN 테스트</button>
         <button class="table-action" data-strategy="${escapeHtml(item.id)}" data-action="edit">수정</button>
         <button class="danger-button" data-strategy="${escapeHtml(item.id)}" data-action="delete" data-name="${escapeHtml(item.name)}">삭제</button>
       </div>
@@ -668,36 +666,33 @@ function refreshVisiblePortfolio() {
 
 function formObject(form) {
   const data = Object.fromEntries(new FormData(form).entries());
-  for (const key of ["budget", "take_profit_pct", "stop_loss_pct"]) {
+  for (const key of ["budget"]) {
     if (data[key] === "") delete data[key];
     else if (data[key] !== undefined) data[key] = Number(data[key]);
   }
-  if (data.strategy_type === "dca") {
-    const items = [...form.querySelectorAll(".dca-item-row")].map((row) => ({
-      symbol: row.querySelector('[data-dca-input="symbol"]').value,
-      market: row.querySelector('[data-dca-input="market"]').value,
-      value: Number(row.querySelector('[data-dca-input="value"]').value),
-    }));
-    data.symbol = items.map((item) => item.symbol).join(",");
-    data.budget = data.budget === undefined || data.budget === "" ? 0 : Number(data.budget);
-    delete data.take_profit_pct;
-    delete data.stop_loss_pct;
-    data.params = {
-      items,
-      interval: data.interval,
-      execution_time: data.execution_time,
-      risk_limits: {
-        daily_budget_krw: data.budget,
-        max_orders_per_day: Number(data.max_orders_per_day || 20),
-      },
-      cost_overrides: {
-        fee_pct: data.fee_pct === "" ? null : Number(data.fee_pct),
-        tax_pct: data.tax_pct === "" ? null : Number(data.tax_pct),
-        slippage_pct: Number(data.slippage_pct || 0),
-      },
-    };
-    if (data.execution_day) data.params.execution_day = data.execution_day;
-  }
+  data.strategy_type = "dca";
+  const items = [...form.querySelectorAll(".dca-item-row")].map((row) => ({
+    symbol: row.querySelector('[data-dca-input="symbol"]').value,
+    market: row.querySelector('[data-dca-input="market"]').value,
+    value: Number(row.querySelector('[data-dca-input="value"]').value),
+  }));
+  data.symbol = items.map((item) => item.symbol).join(",");
+  data.budget = data.budget === undefined || data.budget === "" ? 0 : Number(data.budget);
+  data.params = {
+    items,
+    interval: data.interval,
+    execution_time: data.execution_time,
+    risk_limits: {
+      daily_budget_krw: data.budget,
+      max_orders_per_day: Number(data.max_orders_per_day || 20),
+    },
+    cost_overrides: {
+      fee_pct: data.fee_pct === "" ? null : Number(data.fee_pct),
+      tax_pct: data.tax_pct === "" ? null : Number(data.tax_pct),
+      slippage_pct: Number(data.slippage_pct || 0),
+    },
+  };
+  if (data.execution_day) data.params.execution_day = data.execution_day;
   delete data.interval;
   delete data.execution_day;
   delete data.execution_time;
@@ -711,11 +706,10 @@ function formObject(form) {
 
 function updateStrategyFields() {
   const form = document.querySelector("#strategyForm");
-  const isDca = form.elements.strategy_type.value === "dca";
   const budgetLabel = document.querySelector("#strategyBudgetField");
-  budgetLabel.firstChild.textContent = isDca ? "일일 예산 한도 (KRW)" : "예산 (KRW)";
-  form.querySelectorAll("[data-dca-field]").forEach((element) => element.classList.toggle("hidden", !isDca));
-  form.querySelectorAll("[data-standard-field]").forEach((element) => element.classList.toggle("hidden", isDca));
+  form.elements.strategy_type.value = "dca";
+  budgetLabel.firstChild.textContent = "일일 예산 한도 (KRW)";
+  form.querySelectorAll("[data-dca-field]").forEach((element) => element.classList.remove("hidden"));
   updateExecutionDayField();
   updateDcaOrderFields();
 }
@@ -725,8 +719,7 @@ function updateExecutionDayField() {
   const field = document.querySelector("#executionDayField");
   const select = form.elements.execution_day;
   const interval = form.elements.interval.value;
-  const isDca = form.elements.strategy_type.value === "dca";
-  field.classList.toggle("hidden", !isDca || interval === "daily");
+  field.classList.toggle("hidden", interval === "daily");
   if (interval === "weekly") {
     document.querySelector("#executionDayLabel").textContent = "실행 요일";
     select.innerHTML = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
@@ -1158,13 +1151,10 @@ function openStrategyDialog(strategy = null) {
   resetDcaItems();
   if (strategy) {
     form.elements.name.value = strategy.name;
-    form.elements.strategy_type.value = strategy.strategy_type;
+    form.elements.strategy_type.value = "dca";
     form.elements.platform.value = strategy.platform || "";
-    form.elements.symbol.value = strategy.symbol || "";
     form.elements.budget.value = strategy.budget || 0;
     form.elements.max_orders_per_day.value = strategy.params?.risk_limits?.max_orders_per_day || strategy.params?.max_orders_per_day || 20;
-    form.elements.take_profit_pct.value = strategy.take_profit_pct ?? "";
-    form.elements.stop_loss_pct.value = strategy.stop_loss_pct ?? "";
     form.elements.interval.value = strategy.params?.interval || "daily";
     updateExecutionDayField();
     if (strategy.params?.execution_day) form.elements.execution_day.value = strategy.params.execution_day;
@@ -1173,11 +1163,9 @@ function openStrategyDialog(strategy = null) {
     form.elements.fee_pct.value = costOverrides.fee_pct ?? "";
     form.elements.tax_pct.value = costOverrides.tax_pct ?? "";
     form.elements.slippage_pct.value = costOverrides.slippage_pct ?? 0;
-    if (strategy.strategy_type === "dca") {
-      document.querySelector("#dcaItemRows").replaceChildren();
-      for (const item of dcaItems(strategy, strategy.platform)) {
-        addDcaItemRow(item.symbol, item.order_type === "quantity" ? item.quantity : (item.amount ?? item.amount_usd), item.market);
-      }
+    document.querySelector("#dcaItemRows").replaceChildren();
+    for (const item of dcaItems(strategy, strategy.platform)) {
+      addDcaItemRow(item.symbol, item.order_type === "quantity" ? item.quantity : (item.amount ?? item.amount_usd), item.market);
     }
   }
   updateStrategyFields();
@@ -1195,31 +1183,26 @@ function updateStrategyPreview() {
   const form = document.querySelector("#strategyForm");
   const name = form.elements.name.value.trim() || "이 전략";
   const platform = platformLabel(form.elements.platform.value || "플랫폼 미선택");
-  let description;
-  if (form.elements.strategy_type.value === "dca") {
-    const assets = [...form.querySelectorAll(".dca-item-row")]
-      .map((row) => {
-        const symbol = row.querySelector('[data-dca-input="symbol"]').value.trim();
-        const value = row.querySelector('[data-dca-input="value"]').value;
-        const spec = dcaOrderSpec(form.elements.platform.value, row.querySelector('[data-dca-input="market"]').value);
-        if (!symbol) return "";
-        return `${symbol} ${spec.orderType === "quantity" ? `${value}주` : spec.currency === "USD" ? `$${value}` : `${number.format(value)}원`}`;
-      })
-      .filter(Boolean)
-      .join(", ") || "선택한 자산";
-    const costs = [
-      form.elements.fee_pct.value === "" ? "수수료 공식 자동" : `수수료 직접 설정 ${number.format(Number(form.elements.fee_pct.value))}%`,
-      form.elements.tax_pct.value === "" ? "매수 세금 자동" : `세금 직접 설정 ${number.format(Number(form.elements.tax_pct.value))}%`,
-      `슬리피지 ${number.format(Number(form.elements.slippage_pct.value || 0))}%`,
-    ].join(", ");
-    const riskLimits = [
-      Number(form.elements.budget.value || 0) > 0 ? `일일 예산 ${won.format(Number(form.elements.budget.value))}` : "일일 예산 제한 없음",
-      `일일 최대 ${Number(form.elements.max_orders_per_day.value || 20)}건`,
-    ].join(", ");
-    description = `${platform}에서 ${scheduleLabel({ interval: form.elements.interval.value, execution_time: form.elements.execution_time.value, execution_day: form.elements.execution_day.value })}에 다음 자산을 매수합니다: ${assets}. 비용 가정: ${costs}. 리스크 제한: ${riskLimits}.`;
-  } else {
-    description = `${platform}에서 ${won.format(Number(form.elements.budget.value || 0))} 예산으로 ${form.elements.strategy_type.value} 전략을 운용합니다.`;
-  }
+  const assets = [...form.querySelectorAll(".dca-item-row")]
+    .map((row) => {
+      const symbol = row.querySelector('[data-dca-input="symbol"]').value.trim();
+      const value = row.querySelector('[data-dca-input="value"]').value;
+      const spec = dcaOrderSpec(form.elements.platform.value, row.querySelector('[data-dca-input="market"]').value);
+      if (!symbol) return "";
+      return `${symbol} ${spec.orderType === "quantity" ? `${value}주` : spec.currency === "USD" ? `$${value}` : `${number.format(value)}원`}`;
+    })
+    .filter(Boolean)
+    .join(", ") || "선택한 자산";
+  const costs = [
+    form.elements.fee_pct.value === "" ? "수수료 공식 자동" : `수수료 직접 설정 ${number.format(Number(form.elements.fee_pct.value))}%`,
+    form.elements.tax_pct.value === "" ? "매수 세금 자동" : `세금 직접 설정 ${number.format(Number(form.elements.tax_pct.value))}%`,
+    `슬리피지 ${number.format(Number(form.elements.slippage_pct.value || 0))}%`,
+  ].join(", ");
+  const riskLimits = [
+    Number(form.elements.budget.value || 0) > 0 ? `일일 예산 ${won.format(Number(form.elements.budget.value))}` : "일일 예산 제한 없음",
+    `일일 최대 ${Number(form.elements.max_orders_per_day.value || 20)}건`,
+  ].join(", ");
+  const description = `${platform}에서 ${scheduleLabel({ interval: form.elements.interval.value, execution_time: form.elements.execution_time.value, execution_day: form.elements.execution_day.value })}에 다음 자산을 정기 매수합니다: ${assets}. 비용 가정: ${costs}. 리스크 제한: ${riskLimits}.`;
   document.querySelector("#strategyPreview").innerHTML = `<span>저장 전 확인</span><strong>${escapeHtml(name)}</strong><p>${escapeHtml(description)}</p>`;
 }
 
@@ -1240,7 +1223,6 @@ document.querySelector("#strategyDialog").addEventListener("click", (event) => {
 });
 document.querySelector("#strategyForm").addEventListener("input", updateStrategyPreview);
 document.querySelector("#strategyForm").addEventListener("change", updateStrategyPreview);
-document.querySelector('#strategyForm select[name="strategy_type"]').addEventListener("change", updateStrategyFields);
 document.querySelector('#strategyForm select[name="platform"]').addEventListener("change", updateDcaOrderFields);
 document.querySelector('#strategyForm select[name="interval"]').addEventListener("change", () => {
   updateExecutionDayField();

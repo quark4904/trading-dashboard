@@ -696,6 +696,26 @@ tr:last-child td {
   padding: 22px;
 }
 
+.strategy-type-summary {
+  display: grid;
+  align-content: end;
+  gap: 4px;
+  min-height: 40px;
+  padding: 0 2px 6px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.strategy-type-summary strong {
+  color: var(--ink);
+  font-size: 14px;
+}
+
+.strategy-type-summary small {
+  font-size: 11px;
+  font-weight: 400;
+}
+
 .strategy-preview {
   display: grid;
   gap: 4px;

@@ -10,7 +10,7 @@
     <aside class="sidebar">
       <div>
         <h1>Trading Dashboard</h1>
-        <p>DRY_RUN MVP</p>
+        <p>DCA DRY_RUN MVP</p>
       </div>
       <nav>
         <a href="#portfolio">손익 현황</a>
@@ -55,7 +55,7 @@
         <div class="section-title">
           <div>
             <h2>전략 관리</h2>
-            <p class="section-description">투자 계획을 만들고 실행 상태를 관리합니다.</p>
+            <p class="section-description">모든 전략은 플랫폼별 정기 분할 매수(DCA)로만 운용됩니다.</p>
           </div>
           <button id="newStrategyButton" type="button">새 전략 만들기</button>
         </div>
@@ -68,15 +68,15 @@
           <div class="strategy-dialog-header">
             <div>
               <h2 id="strategyDialogTitle">새 전략 만들기</h2>
-              <p>플랫폼에 맞는 주문 항목만 표시됩니다.</p>
+              <p>이 앱은 DCA 전략만 지원하며 플랫폼에 맞는 매수 항목만 표시합니다.</p>
             </div>
             <button id="strategyDialogClose" class="dialog-close" type="button" aria-label="닫기">×</button>
           </div>
           <div class="form-grid strategy-form-body">
-          <label>전략명<input name="name" placeholder="예: BTC 추세 추종" required /></label>
-          <label>유형<select name="strategy_type"><option value="dca">DCA</option><option value="rebalance">리밸런싱</option><option value="momentum">모멘텀</option><option value="mean_reversion">평균회귀</option><option value="custom">커스텀</option></select></label>
-          <label>플랫폼<select name="platform"></select></label>
-          <label data-standard-field>종목 코드<input name="symbol" placeholder="비워두면 전체" /></label>
+          <label>전략명<input name="name" placeholder="예: 매일 BTC 분할 매수" required /></label>
+          <div class="strategy-type-summary"><span>전략 유형</span><strong>DCA · 정기 분할 매수</strong><small>다른 전략 유형은 저장할 수 없습니다.</small></div>
+          <input name="strategy_type" type="hidden" value="dca" />
+          <label>플랫폼<select name="platform" required></select></label>
           <div id="dcaItemsEditor" class="dca-items-editor" data-dca-field>
             <div class="dca-items-header">
               <strong id="dcaItemsTitle">매수 자산별 주문 설정</strong>
@@ -98,8 +98,6 @@
           <label data-dca-field>실행 시간 (KST)<input name="execution_time" type="time" value="23:30" required /></label>
           <label id="strategyBudgetField">예산 (KRW)<input name="budget" type="number" step="1" min="0" value="0" /></label>
           <label data-dca-field>일일 최대 주문 횟수<input name="max_orders_per_day" type="number" step="1" min="1" max="100" value="20" /></label>
-          <label data-standard-field>익절 %<input name="take_profit_pct" type="number" step="0.1" /></label>
-          <label data-standard-field>손절 %<input name="stop_loss_pct" type="number" step="0.1" /></label>
           </div>
           <div id="strategyPreview" class="strategy-preview"></div>
           <div class="strategy-dialog-actions">

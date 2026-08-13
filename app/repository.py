@@ -10,9 +10,10 @@ from typing import Any, Iterator
 from zoneinfo import ZoneInfo
 
 from app.config import DB_PATH, env_flag
+from app.strategy_capabilities import DCA_STRATEGY_TYPE
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 def utc_now() -> str:
@@ -263,10 +264,16 @@ class Repository:
             (1, "baseline_existing_schema"),
             (2, "operational_locks_and_alerts"),
             (3, "execution_source_attribution"),
+            (4, "dca_only_strategy_mode"),
         )
         for version, name in migrations:
             if version in applied:
                 continue
+            if version == 4:
+                conn.execute(
+                    "DELETE FROM strategies WHERE strategy_type <> ?",
+                    (DCA_STRATEGY_TYPE,),
+                )
             conn.execute(
                 "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)",
                 (version, name, utc_now()),
@@ -343,15 +350,31 @@ class Repository:
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                "월간 리밸런싱 예시",
-                "rebalance",
+                "매일 비트코인 DCA 예시",
+                DCA_STRATEGY_TYPE,
                 0,
-                None,
-                None,
+                "upbit",
+                "KRW-BTC",
                 1000000,
-                8,
-                -5,
-                json.dumps({"interval": "monthly", "target_cash_pct": 10}, ensure_ascii=False),
+                None,
+                None,
+                json.dumps(
+                    {
+                        "items": [
+                            {
+                                "symbol": "KRW-BTC",
+                                "market": "crypto",
+                                "order_type": "amount",
+                                "amount": 5000,
+                                "currency": "KRW",
+                            }
+                        ],
+                        "interval": "daily",
+                        "execution_time": "23:30",
+                        "risk_limits": {"daily_budget_krw": 1000000, "max_orders_per_day": 20},
+                    },
+                    ensure_ascii=False,
+                ),
                 now,
                 now,
             ),
@@ -1019,7 +1042,10 @@ class Repository:
 
     def strategy(self, strategy_id: int) -> dict[str, Any] | None:
         with self.connect() as conn:
-            row = conn.execute("SELECT * FROM strategies WHERE id = ?", (strategy_id,)).fetchone()
+            row = conn.execute(
+                "SELECT * FROM strategies WHERE id = ? AND strategy_type = ?",
+                (strategy_id, DCA_STRATEGY_TYPE),
+            ).fetchone()
             return self._strategy_row(row) if row else None
 
     def start_strategy_run(
@@ -1120,7 +1146,10 @@ class Repository:
 
     def strategies(self) -> list[dict[str, Any]]:
         with self.connect() as conn:
-            rows = conn.execute("SELECT * FROM strategies ORDER BY id DESC").fetchall()
+            rows = conn.execute(
+                "SELECT * FROM strategies WHERE strategy_type = ? ORDER BY id DESC",
+                (DCA_STRATEGY_TYPE,),
+            ).fetchall()
             return [self._strategy_row(row) for row in rows]
 
     @staticmethod
@@ -1131,6 +1160,7 @@ class Repository:
         return item
 
     def create_strategy(self, request: dict[str, Any]) -> dict[str, Any]:
+        self._require_dca_strategy(request)
         now = utc_now()
         params = request.get("params") or {}
         with self.connect() as conn:
@@ -1142,13 +1172,13 @@ class Repository:
                 """,
                 (
                     request["name"],
-                    request.get("strategy_type", "custom"),
+                    DCA_STRATEGY_TYPE,
                     1 if request.get("enabled", False) else 0,
                     request.get("platform") or None,
                     request.get("symbol") or None,
                     float(request.get("budget") or 0),
-                    request.get("take_profit_pct"),
-                    request.get("stop_loss_pct"),
+                    None,
+                    None,
                     json.dumps(params, ensure_ascii=False),
                     now,
                     now,
@@ -1157,9 +1187,13 @@ class Repository:
             return {"id": cursor.lastrowid, **request, "created_at": now, "updated_at": now}
 
     def update_strategy(self, strategy_id: int, request: dict[str, Any]) -> dict[str, Any] | None:
+        self._require_dca_strategy(request)
         now = utc_now()
         with self.connect() as conn:
-            existing = conn.execute("SELECT enabled, created_at FROM strategies WHERE id = ?", (strategy_id,)).fetchone()
+            existing = conn.execute(
+                "SELECT enabled, created_at FROM strategies WHERE id = ? AND strategy_type = ?",
+                (strategy_id, DCA_STRATEGY_TYPE),
+            ).fetchone()
             if not existing:
                 return None
             conn.execute(
@@ -1171,12 +1205,12 @@ class Repository:
                 """,
                 (
                     request["name"],
-                    request.get("strategy_type", "custom"),
+                    DCA_STRATEGY_TYPE,
                     request.get("platform") or None,
                     request.get("symbol") or None,
                     float(request.get("budget") or 0),
-                    request.get("take_profit_pct"),
-                    request.get("stop_loss_pct"),
+                    None,
+                    None,
                     json.dumps(request.get("params") or {}, ensure_ascii=False),
                     now,
                     strategy_id,
@@ -1188,18 +1222,29 @@ class Repository:
     def set_strategy_enabled(self, strategy_id: int, enabled: bool) -> dict[str, Any] | None:
         with self.connect() as conn:
             conn.execute(
-                "UPDATE strategies SET enabled = ?, updated_at = ? WHERE id = ?",
-                (1 if enabled else 0, utc_now(), strategy_id),
+                "UPDATE strategies SET enabled = ?, updated_at = ? WHERE id = ? AND strategy_type = ?",
+                (1 if enabled else 0, utc_now(), strategy_id, DCA_STRATEGY_TYPE),
             )
-            row = conn.execute("SELECT * FROM strategies WHERE id = ?", (strategy_id,)).fetchone()
+            row = conn.execute(
+                "SELECT * FROM strategies WHERE id = ? AND strategy_type = ?",
+                (strategy_id, DCA_STRATEGY_TYPE),
+            ).fetchone()
             if not row:
                 return None
             return self._strategy_row(row)
 
     def delete_strategy(self, strategy_id: int) -> bool:
         with self.connect() as conn:
-            cursor = conn.execute("DELETE FROM strategies WHERE id = ?", (strategy_id,))
+            cursor = conn.execute(
+                "DELETE FROM strategies WHERE id = ? AND strategy_type = ?",
+                (strategy_id, DCA_STRATEGY_TYPE),
+            )
             return cursor.rowcount > 0
+
+    @staticmethod
+    def _require_dca_strategy(request: dict[str, Any]) -> None:
+        if str(request.get("strategy_type") or DCA_STRATEGY_TYPE).strip().lower() != DCA_STRATEGY_TYPE:
+            raise ValueError("현재는 DCA 전략만 저장할 수 있습니다.")
 
 
 def _parse_datetime(value: Any) -> datetime | None:

@@ -12,7 +12,7 @@ from app.order_costs import (
     estimate_dca_buy_cost,
 )
 from app.risk import KST, trading_session
-from app.strategy_capabilities import dca_market_capability
+from app.strategy_capabilities import DCA_STRATEGY_TYPE, dca_market_capability
 
 
 MAX_BACKTEST_BARS = 20_000
@@ -34,8 +34,8 @@ def run_dca_backtest(
     is called from this module.
     """
 
-    if strategy.get("strategy_type") != "dca":
-        raise ValueError("DCA 전략만 백테스트할 수 있습니다.")
+    if strategy.get("strategy_type") != DCA_STRATEGY_TYPE:
+        raise ValueError("현재는 DCA 전략만 백테스트할 수 있습니다.")
     platform = str(strategy.get("platform") or "").strip()
     if not platform:
         raise ValueError("백테스트 전략의 플랫폼이 필요합니다.")

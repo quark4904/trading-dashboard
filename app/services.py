@@ -26,7 +26,7 @@ from app.risk import (
 )
 from app.repository import Repository
 from app.scheduler import KST, scheduled_slot
-from app.strategy_capabilities import compile_dca_buy_request, dca_market_capability
+from app.strategy_capabilities import DCA_STRATEGY_TYPE, compile_dca_buy_request, dca_market_capability
 
 
 DUST_VALUE_THRESHOLD = 100
@@ -415,8 +415,8 @@ class TradingService:
         strategy = self.repo.strategy(strategy_id)
         if not strategy:
             raise ValueError("전략을 찾을 수 없습니다.")
-        if strategy["strategy_type"] != "dca":
-            raise ValueError("DCA 전략만 DRY_RUN 테스트를 실행할 수 있습니다.")
+        if strategy["strategy_type"] != DCA_STRATEGY_TYPE:
+            raise ValueError("현재는 DCA 전략만 DRY_RUN 테스트를 실행할 수 있습니다.")
         return self._run_dca_strategy(strategy, trigger="manual", schedule_key=None, now=None)
 
     def run_dca_backtest(
@@ -428,6 +428,8 @@ class TradingService:
         strategy = self.repo.strategy(strategy_id)
         if not strategy:
             raise ValueError("전략을 찾을 수 없습니다.")
+        if strategy["strategy_type"] != DCA_STRATEGY_TYPE:
+            raise ValueError("현재는 DCA 전략만 백테스트할 수 있습니다.")
         return run_dca_backtest(
             strategy,
             bars,

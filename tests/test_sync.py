@@ -188,12 +188,16 @@ class RepositoryTests(unittest.TestCase):
         strategy = repo.create_strategy(
             {
                 "name": "삭제 테스트",
-                "strategy_type": "custom",
+                "strategy_type": "dca",
                 "enabled": False,
-                "platform": "",
-                "symbol": "",
+                "platform": "upbit",
+                "symbol": "KRW-BTC",
                 "budget": 0,
-                "params": {},
+                "params": {
+                    "items": [{"symbol": "KRW-BTC", "amount": 5000, "order_type": "amount", "currency": "KRW"}],
+                    "interval": "daily",
+                    "execution_time": "23:30",
+                },
             }
         )
 
@@ -206,12 +210,16 @@ class RepositoryTests(unittest.TestCase):
         strategy = repo.create_strategy(
             {
                 "name": "수정 전",
-                "strategy_type": "custom",
+                "strategy_type": "dca",
                 "enabled": False,
-                "platform": "",
-                "symbol": "",
+                "platform": "upbit",
+                "symbol": "KRW-BTC",
                 "budget": 0,
-                "params": {},
+                "params": {
+                    "items": [{"symbol": "KRW-BTC", "amount": 5000, "order_type": "amount", "currency": "KRW"}],
+                    "interval": "daily",
+                    "execution_time": "23:30",
+                },
             }
         )
         repo.set_strategy_enabled(strategy["id"], True)
@@ -220,11 +228,15 @@ class RepositoryTests(unittest.TestCase):
             strategy["id"],
             {
                 "name": "수정 후",
-                "strategy_type": "custom",
+                "strategy_type": "dca",
                 "platform": "toss",
                 "symbol": "SCHD",
                 "budget": 100,
-                "params": {},
+                "params": {
+                    "items": [{"symbol": "SCHD", "amount": 1, "order_type": "amount", "currency": "USD", "market": "overseas"}],
+                    "interval": "daily",
+                    "execution_time": "23:30",
+                },
             },
         )
 
@@ -283,15 +295,46 @@ class OperationalRepositoryTests(unittest.TestCase):
         self.temp_dir.cleanup()
 
     def test_schema_migration_history_is_recorded(self) -> None:
-        self.assertEqual(self.repo.schema_version(), 3)
+        self.assertEqual(self.repo.schema_version(), 4)
         self.assertEqual(
             [item["name"] for item in self.repo.migration_history()],
             [
                 "baseline_existing_schema",
                 "operational_locks_and_alerts",
                 "execution_source_attribution",
+                "dca_only_strategy_mode",
             ],
         )
+
+    def test_dca_only_migration_deletes_legacy_strategies(self) -> None:
+        with self.repo.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO strategies
+                (name, strategy_type, enabled, platform, symbol, budget, params_json, created_at, updated_at)
+                VALUES (?, ?, 0, ?, ?, 0, '{}', ?, ?)
+                """,
+                ("레거시 전략", "momentum", "upbit", "KRW-BTC", "2026-08-13", "2026-08-13"),
+            )
+            conn.execute("DELETE FROM schema_migrations WHERE version = 4")
+
+        Repository(self.db_path)
+
+        with self.repo.connect() as conn:
+            remaining = conn.execute("SELECT COUNT(*) FROM strategies").fetchone()[0]
+        self.assertEqual(remaining, 0)
+
+    def test_repository_rejects_non_dca_strategy_writes(self) -> None:
+        with self.assertRaisesRegex(ValueError, "DCA 전략만"):
+            self.repo.create_strategy(
+                {
+                    "name": "레거시 전략",
+                    "strategy_type": "momentum",
+                    "platform": "upbit",
+                    "symbol": "KRW-BTC",
+                    "params": {},
+                }
+            )
 
     def test_platform_operation_lock_is_exclusive_and_releasable(self) -> None:
         self.assertEqual(
@@ -520,9 +563,9 @@ class HTTPAuthenticationIntegrationTests(unittest.TestCase):
             "/api/strategies",
             {
                 "name": "보호된 전략",
-                "strategy_type": "custom",
-                "platform": "",
-                "params": {},
+                "strategy_type": "dca",
+                "platform": "upbit",
+                "params": {"items": [{"symbol": "KRW-BTC", "value": 5000}]},
             },
             headers={"Cookie": operator_cookie, "X-CSRF-Token": operator_csrf},
         )
@@ -539,7 +582,7 @@ class HTTPAuthenticationIntegrationTests(unittest.TestCase):
         status, _, _ = self.request(
             "POST",
             "/api/strategies",
-            {"name": "차단 전략", "strategy_type": "custom", "platform": "", "params": {}},
+            {"name": "차단 전략", "strategy_type": "dca", "platform": "upbit", "params": {"items": [{"symbol": "KRW-BTC", "value": 5000}]}},
             headers={"Cookie": viewer_cookie, "X-CSRF-Token": viewer_csrf},
         )
         self.assertEqual(status, 403)
@@ -655,19 +698,33 @@ class IntegrationClientTests(unittest.TestCase):
 
 
 class ValidationTests(unittest.TestCase):
-    def test_strategy_is_normalized(self) -> None:
+    def test_dca_strategy_is_normalized(self) -> None:
         result = validate_strategy(
             {
-                "name": "  월간 리밸런싱  ",
-                "strategy_type": "rebalance",
+                "name": "  매일 DCA  ",
+                "strategy_type": "dca",
+                "platform": "upbit",
                 "budget": "1000",
                 "enabled": True,
+                "params": {"items": [{"symbol": "KRW-BTC", "value": 5000}]},
             }
         )
 
-        self.assertEqual(result["name"], "월간 리밸런싱")
+        self.assertEqual(result["name"], "매일 DCA")
+        self.assertEqual(result["strategy_type"], "dca")
         self.assertEqual(result["budget"], 1000)
         self.assertFalse(result["enabled"])
+
+    def test_non_dca_strategy_is_rejected(self) -> None:
+        with self.assertRaisesRegex(ValueError, "DCA 전략만"):
+            validate_strategy(
+                {
+                    "name": "지원하지 않는 전략",
+                    "strategy_type": "momentum",
+                    "platform": "upbit",
+                    "params": {"items": [{"symbol": "KRW-BTC", "value": 5000}]},
+                }
+            )
 
     def test_strategy_rejects_invalid_numbers(self) -> None:
         for budget in [-1, "nan", "not-a-number"]:
@@ -1649,12 +1706,16 @@ class MaintenanceTests(unittest.TestCase):
         self.repo.create_strategy(
             {
                 "name": "백업 테스트",
-                "strategy_type": "custom",
+                "strategy_type": "dca",
                 "enabled": False,
-                "platform": "",
-                "symbol": "",
+                "platform": "upbit",
+                "symbol": "KRW-BTC",
                 "budget": 0,
-                "params": {},
+                "params": {
+                    "items": [{"symbol": "KRW-BTC", "amount": 5000, "order_type": "amount", "currency": "KRW"}],
+                    "interval": "daily",
+                    "execution_time": "23:30",
+                },
             }
         )
 

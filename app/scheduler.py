@@ -11,6 +11,7 @@ if TYPE_CHECKING:
 
 from app.maintenance import automated_backup
 from app.observability import configure_logging
+from app.strategy_capabilities import DCA_STRATEGY_TYPE
 
 
 KST = ZoneInfo("Asia/Seoul")
@@ -19,7 +20,7 @@ WEEKDAYS = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", 
 
 def scheduled_slot(strategy: dict, now: datetime) -> str | None:
     """Return the strategy-scoped KST minute key when a DCA strategy is due."""
-    if not strategy.get("enabled") or strategy.get("strategy_type") != "dca":
+    if not strategy.get("enabled") or strategy.get("strategy_type") != DCA_STRATEGY_TYPE:
         return None
 
     now_kst = now.astimezone(KST)

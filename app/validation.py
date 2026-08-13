@@ -6,7 +6,7 @@ import re
 from app.config import platform_configs
 from app.order_costs import cost_overrides_from_params
 from app.risk import DEFAULT_MAX_ORDERS_PER_DAY
-from app.strategy_capabilities import dca_market_capability
+from app.strategy_capabilities import DCA_STRATEGY_TYPE, dca_market_capability
 
 
 def validate_strategy(data: dict) -> dict:
@@ -16,9 +16,9 @@ def validate_strategy(data: dict) -> dict:
     if len(name) > 100:
         raise ValueError("전략 이름은 100자 이하여야 합니다.")
 
-    strategy_type = str(data.get("strategy_type") or "custom")
-    if strategy_type not in {"dca", "rebalance", "momentum", "mean_reversion", "custom"}:
-        raise ValueError("지원하지 않는 전략 유형입니다.")
+    strategy_type = str(data.get("strategy_type") or DCA_STRATEGY_TYPE).strip().lower()
+    if strategy_type != DCA_STRATEGY_TYPE:
+        raise ValueError("현재는 DCA 전략만 지원합니다.")
 
     platform = str(data.get("platform") or "").strip()
     if platform and platform not in {item.code for item in platform_configs()}:
@@ -33,7 +33,7 @@ def validate_strategy(data: dict) -> dict:
         raise ValueError("예산은 0 이상이어야 합니다.")
 
     params = data.get("params") if isinstance(data.get("params"), dict) else {}
-    if strategy_type == "dca":
+    if strategy_type == DCA_STRATEGY_TYPE:
         if not platform:
             raise ValueError("DCA 전략의 플랫폼을 선택하세요.")
         raw_items = params.get("items")
@@ -116,10 +116,6 @@ def validate_strategy(data: dict) -> dict:
         "budget": budget,
         "params": params,
     }
-    for key, label in [("take_profit_pct", "익절률"), ("stop_loss_pct", "손절률")]:
-        value = data.get(key)
-        if value is not None:
-            result[key] = validated_number(value, label)
     return result
 
 
