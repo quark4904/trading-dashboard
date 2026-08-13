@@ -14,6 +14,7 @@ const state = {
   summary: null,
   syncStatus: { latest: [], history: [], api_keys: [], alerts: [] },
   aliasTarget: null,
+  executionSource: "all",
   assetFilters: {
     platform: "all",
     query: "",
@@ -62,6 +63,18 @@ function platformLabel(platform) {
     kis_isa: "한투(ISA)",
     toss: "토스",
   }[platform] ?? platform;
+}
+
+function executionSourceLabel(source) {
+  return {
+    strategy: "전략 연결",
+    external: "외부 체결",
+    unknown: "출처 미확인",
+  }[source] ?? "출처 미확인";
+}
+
+function executionSourceClass(source) {
+  return ["strategy", "external", "unknown"].includes(source) ? source : "unknown";
 }
 
 function escapeHtml(value) {
@@ -409,9 +422,12 @@ async function renderOrders() {
 }
 
 async function renderExecutions() {
-  const executions = await api("/api/executions");
+  const allExecutions = await api("/api/executions");
+  const executions = state.executionSource === "all"
+    ? allExecutions
+    : allExecutions.filter((item) => (item.source || "unknown") === state.executionSource);
   document.querySelector("#executionsTable").innerHTML = table(
-    ["체결 시간", "플랫폼", "종목", "구분", "수량", "평균 체결가", "체결 금액", "수수료", "세금", "상태"],
+    ["체결 시간", "플랫폼", "종목", "구분", "출처", "수량", "평균 체결가", "체결 금액", "수수료", "세금", "상태"],
     executions.length
       ? executions.map(
           (item) => `
@@ -420,6 +436,10 @@ async function renderExecutions() {
           <td>${escapeHtml(platformLabel(item.platform))}</td>
           <td>${escapeHtml(item.display_name || item.symbol)}<br /><span class="muted">${escapeHtml(item.symbol)}</span></td>
           <td>${item.side === "buy" ? "매수" : "매도"}</td>
+          <td>
+            <span class="execution-source ${executionSourceClass(item.source)}">${executionSourceLabel(item.source)}</span>
+            ${item.strategy_name ? `<br /><span class="muted">${escapeHtml(item.strategy_name)}</span>` : ""}
+          </td>
           <td>${number.format(item.quantity)}</td>
           <td>${formatCurrencyAmount(item.average_price, item.currency)}</td>
           <td>${formatCurrencyAmount(item.amount, item.currency)}</td>
@@ -429,7 +449,7 @@ async function renderExecutions() {
         </tr>
       `,
         )
-      : [`<tr><td colspan="10">아직 동기화된 실제 체결 이력이 없습니다.</td></tr>`],
+      : [`<tr><td colspan="11">${allExecutions.length ? "선택한 출처의 체결 이력이 없습니다." : "아직 동기화된 실제 체결 이력이 없습니다."}</td></tr>`],
   );
 }
 
@@ -767,6 +787,12 @@ function resetDcaItems() {
 }
 
 document.querySelector("#refreshButton").addEventListener("click", refresh);
+document.querySelector("#executionSourceFilter").addEventListener("change", (event) => {
+  state.executionSource = event.target.value;
+  renderExecutions().catch((error) => {
+    document.querySelector("#syncMessage").textContent = `체결 이력 필터 적용 실패: ${error.message}`;
+  });
+});
 
 document.querySelector("#assetPlatformFilter").addEventListener("click", (event) => {
   const button = event.target.closest("[data-platform]");

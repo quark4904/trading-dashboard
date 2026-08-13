@@ -79,6 +79,11 @@ DCA 시장가 매수는 `POST /v1/orders`에 다음 JSON을 전달한다.
 upsert한다. 기본 조회 기간은 90일이며 `TRADING_DASHBOARD_EXECUTION_HISTORY_DAYS`로
 1~90일 범위에서 변경할 수 있다.
 
+외부 API에서 가져온 체결은 계좌 앱에서 직접 거래한 내역을 포함할 수 있으므로 기본 `source`를
+`external`로 저장한다. 실제 전략 주문 어댑터가 외부 주문 ID와 전략 실행을 함께 전달하는 경우에는
+`source`를 `strategy`로 저장하고 `strategy_id`·`strategy_run_id`를 연결한다. 따라서 전략 성과를
+계산할 때는 전략 연결 체결만 선택할 수 있고, 계좌의 전체 체결 이력은 별도로 보존한다.
+
 ### 토스증권
 
 - `GET /api/v1/orders?status=CLOSED`

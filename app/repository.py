@@ -12,7 +12,7 @@ from zoneinfo import ZoneInfo
 from app.config import DB_PATH, env_flag
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 def utc_now() -> str:
@@ -90,6 +90,9 @@ class Repository:
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     platform TEXT NOT NULL,
                     external_order_id TEXT NOT NULL,
+                    source TEXT NOT NULL DEFAULT 'external',
+                    strategy_id INTEGER,
+                    strategy_run_id INTEGER,
                     ordered_at TEXT NOT NULL,
                     executed_at TEXT,
                     symbol TEXT NOT NULL,
@@ -195,6 +198,15 @@ class Repository:
             }
             if "details_json" not in exchange_rate_columns:
                 conn.execute("ALTER TABLE exchange_rates ADD COLUMN details_json TEXT NOT NULL DEFAULT '{}'")
+            execution_columns = {
+                row["name"] for row in conn.execute("PRAGMA table_info(executions)").fetchall()
+            }
+            if "source" not in execution_columns:
+                conn.execute("ALTER TABLE executions ADD COLUMN source TEXT NOT NULL DEFAULT 'external'")
+            if "strategy_id" not in execution_columns:
+                conn.execute("ALTER TABLE executions ADD COLUMN strategy_id INTEGER")
+            if "strategy_run_id" not in execution_columns:
+                conn.execute("ALTER TABLE executions ADD COLUMN strategy_run_id INTEGER")
             sync_run_columns = {
                 row["name"] for row in conn.execute("PRAGMA table_info(sync_runs)").fetchall()
             }
@@ -250,6 +262,7 @@ class Repository:
         migrations = (
             (1, "baseline_existing_schema"),
             (2, "operational_locks_and_alerts"),
+            (3, "execution_source_attribution"),
         )
         for version, name in migrations:
             if version in applied:
@@ -391,11 +404,19 @@ class Repository:
             conn.executemany(
                 """
                 INSERT INTO executions
-                (platform, external_order_id, ordered_at, executed_at, symbol, name, side, order_type, status,
+                (platform, external_order_id, source, strategy_id, strategy_run_id, ordered_at, executed_at,
+                 symbol, name, side, order_type, status,
                  quantity, average_price, amount, currency, actual_fee, estimated_fee, actual_tax, estimated_tax,
                  cost_profile_json, raw_json, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(platform, external_order_id) DO UPDATE SET
+                    source = CASE
+                        WHEN excluded.strategy_id IS NOT NULL OR excluded.strategy_run_id IS NOT NULL THEN 'strategy'
+                        WHEN executions.strategy_id IS NOT NULL OR executions.strategy_run_id IS NOT NULL THEN 'strategy'
+                        ELSE COALESCE(excluded.source, executions.source, 'external')
+                    END,
+                    strategy_id = COALESCE(excluded.strategy_id, executions.strategy_id),
+                    strategy_run_id = COALESCE(excluded.strategy_run_id, executions.strategy_run_id),
                     ordered_at = excluded.ordered_at,
                     executed_at = excluded.executed_at,
                     symbol = excluded.symbol,
@@ -429,6 +450,14 @@ class Repository:
                     (
                         platform,
                         row["external_order_id"],
+                        row.get("source")
+                        or (
+                            "strategy"
+                            if row.get("strategy_id") is not None or row.get("strategy_run_id") is not None
+                            else "external"
+                        ),
+                        row.get("strategy_id"),
+                        row.get("strategy_run_id"),
                         row["ordered_at"],
                         row.get("executed_at"),
                         row["symbol"],
@@ -458,11 +487,20 @@ class Repository:
         with self.connect() as conn:
             rows = conn.execute(
                 """
-                SELECT executions.*, asset_aliases.alias
+                SELECT executions.*, asset_aliases.alias,
+                       CASE
+                           WHEN executions.strategy_id IS NOT NULL OR executions.strategy_run_id IS NOT NULL
+                           THEN COALESCE(strategies.name, '삭제된 전략')
+                           ELSE NULL
+                       END AS strategy_name
                 FROM executions
                 LEFT JOIN asset_aliases
                   ON asset_aliases.platform = executions.platform
                  AND asset_aliases.symbol = executions.symbol
+                LEFT JOIN strategy_runs AS linked_runs
+                  ON linked_runs.id = executions.strategy_run_id
+                LEFT JOIN strategies
+                  ON strategies.id = COALESCE(executions.strategy_id, linked_runs.strategy_id)
                 ORDER BY COALESCE(executions.executed_at, executions.ordered_at) DESC, executions.id DESC
                 LIMIT ?
                 """,
@@ -478,6 +516,11 @@ class Repository:
         except json.JSONDecodeError:
             execution["cost_profile"] = {}
         execution.pop("raw_json", None)
+        execution["source"] = execution.get("source") or (
+            "strategy"
+            if execution.get("strategy_id") is not None or execution.get("strategy_run_id") is not None
+            else "external"
+        )
         execution["display_name"] = execution.get("alias") or execution["name"]
         execution["fee"] = (
             execution["actual_fee"]

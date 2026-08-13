@@ -497,6 +497,36 @@ tr:last-child td {
   font-size: 12px;
 }
 
+.activity-filters {
+  grid-template-columns: minmax(220px, 280px);
+}
+
+.execution-source {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: #eef2f6;
+  color: #52606d;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.execution-source.strategy {
+  background: #e8f6f0;
+  color: #147a58;
+}
+
+.execution-source.external {
+  background: #fff4dc;
+  color: #8a5b00;
+}
+
+.execution-source.unknown {
+  background: #f0f1f3;
+  color: #66717f;
+}
+
 .status-list {
   display: grid;
   gap: 10px;

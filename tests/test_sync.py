@@ -116,6 +116,51 @@ class RepositoryTests(unittest.TestCase):
         self.assertEqual(executions[0]["fee"], 10)
         self.assertEqual(executions[0]["fee_status"], "actual")
         self.assertEqual(executions[0]["cost_profile"]["fee_source"]["kind"], "actual_api")
+        self.assertEqual(executions[0]["source"], "external")
+
+    def test_execution_can_be_attributed_to_a_strategy_run(self) -> None:
+        repo = Repository(self.db_path)
+        strategy = repo.create_strategy(
+            {
+                "name": "연결 테스트 전략",
+                "strategy_type": "dca",
+                "enabled": True,
+                "platform": "toss",
+                "symbol": "SCHD",
+                "budget": 100,
+                "params": {},
+            }
+        )
+        run = repo.start_strategy_run(strategy["id"], "scheduled")
+        repo.upsert_executions(
+            "toss",
+            [
+                {
+                    "external_order_id": "strategy-order-1",
+                    "source": "strategy",
+                    "strategy_id": strategy["id"],
+                    "strategy_run_id": run["id"],
+                    "ordered_at": "2026-07-30T09:00:00+09:00",
+                    "executed_at": "2026-07-30T09:00:01+09:00",
+                    "symbol": "SCHD",
+                    "name": "SCHD",
+                    "side": "buy",
+                    "order_type": "market",
+                    "status": "filled",
+                    "quantity": 1,
+                    "average_price": 100,
+                    "amount": 100,
+                    "currency": "USD",
+                }
+            ],
+        )
+
+        execution = repo.executions()[0]
+
+        self.assertEqual(execution["source"], "strategy")
+        self.assertEqual(execution["strategy_id"], strategy["id"])
+        self.assertEqual(execution["strategy_run_id"], run["id"])
+        self.assertEqual(execution["strategy_name"], "연결 테스트 전략")
 
     def test_asset_alias_survives_holding_replacement(self) -> None:
         repo = Repository(self.db_path)
@@ -238,10 +283,14 @@ class OperationalRepositoryTests(unittest.TestCase):
         self.temp_dir.cleanup()
 
     def test_schema_migration_history_is_recorded(self) -> None:
-        self.assertEqual(self.repo.schema_version(), 2)
+        self.assertEqual(self.repo.schema_version(), 3)
         self.assertEqual(
             [item["name"] for item in self.repo.migration_history()],
-            ["baseline_existing_schema", "operational_locks_and_alerts"],
+            [
+                "baseline_existing_schema",
+                "operational_locks_and_alerts",
+                "execution_source_attribution",
+            ],
         )
 
     def test_platform_operation_lock_is_exclusive_and_releasable(self) -> None:

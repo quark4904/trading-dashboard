@@ -74,4 +74,5 @@ docker compose exec trading-dashboard \
 이력 확인을 수행한다. `.env`와 데이터베이스는 백업 명령의 대상이 아니므로 별도로 보존한다.
 
 스키마는 `schema_migrations`에 버전과 적용 시각을 기록한다. 애플리케이션 시작 시 누락된
-마이그레이션을 idempotent하게 적용하며, 현재 버전은 2이다.
+마이그레이션을 idempotent하게 적용하며, 현재 버전은 3이다. 버전 3은 실제 체결의 출처와
+전략 연결 정보를 추가하며 기존 체결은 `external`로 보존한다.
